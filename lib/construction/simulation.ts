@@ -14,17 +14,20 @@ export const MATERIALS:Record<MaterialKind,{name:string;color:string;pos:V3}>= {
 export const ROLES=['材料员','设备员','建筑工','建筑工','安装工'];
 export const LIFT_PAD:V3=PAD;
 export const CRANE_CONTROL:V3=CONTROL;
-export type Task = { id: string; label: string; stage: number; parts: Part[]; work: number; progress: number; owner: number | null; done: boolean; site: V3; material:MaterialKind; amount:number; used:number; supply:SupplyState; crew:number[]; needsLift:boolean; heavy:boolean; specialist:boolean; mixed:number; prepared:number; pickupTime?:number; pickupFrom?:V3; dropTime?:number; dropFrom?:V3; padSlot:number };
-export type WorkerState = 'unloadTrip'|'prepTrip'|'preparing'|'idle'|'material'|'carrying'|'working'|'restTrip'|'resting'|'returning'|'waiting'|'finished'|'loading'|'unloading'|'toCart'|'toControl'|'operating'|'mixing'|'movingWork'|'waitingSupply'|'waitingPartner'|'fetching'|'handcarry';
-export type Worker = { id: number; buildingId: string; color: string; pos: V3; state: WorkerState; task: string|null; path: V3[]; stamina: number; restAfter: number; restLeft: number; heading: number; phase: number; completed: number; worked: number; timer:number; role:string; assist:string|null; assisted:number };
+export type Task = { id: string; label: string; stage: number; parts: Part[]; work: number; progress: number; owner: number | null; driver:number|null; done: boolean; site: V3; material:MaterialKind; amount:number; used:number; supply:SupplyState; crew:number[]; needsLift:boolean; heavy:boolean; specialist:boolean; mixed:number; pickupTime?:number; pickupFrom?:V3; dropTime?:number; dropFrom?:V3; padSlot:number };
+export type WorkerState = 'supporting'|'unloadTrip'|'idle'|'material'|'carrying'|'working'|'returning'|'waiting'|'finished'|'loading'|'unloading'|'toCart'|'toControl'|'operating'|'mixing'|'movingWork'|'waitingSupply'|'waitingPartner'|'fetching'|'pickupLoading'|'handcarry';
+export type Worker = { id: number; buildingId: string; color: string; pos: V3; state: WorkerState; task: string|null; path: V3[]; heading: number; phase: number; completed: number; worked: number; timer:number; role:string };
 export const STAGES = ['浇筑基础','首层框架','墙体与楼梯','铺设楼板','二层框架','二层墙体','搭建屋顶','收尾交付'];
 export const COLORS = ['#df9c37','#5c97b4','#78996a','#c47558','#9c83ae'];
 const WALL='#e4dfca', FRAME='#c9c9b8', WOOD='#aa7950', ROOF='#526f77';
 export function blueprint(): Task[] {
  const tasks:Task[]=[]; let seq=0;
  function add(stage:number,label:string,parts:Omit<Part,'id'>[],site?:V3,work=5) {
-  const id=`task-${++seq}`; const p=parts[0].pos;
-  tasks.push({id,label,stage,parts:parts.map((x,i)=>({...x,id:`${id}-${i}`})),work,progress:0,owner:null,done:false,material:'timber',amount:1,used:0,supply:'stock',crew:[],needsLift:false,heavy:false,specialist:false,mixed:0,prepared:0,padSlot:0,site:site??[p[0]<0?-5.35:5.35,stage>=4?3.3:0,p[2]],});
+   const id=`task-${++seq}`; const p=parts[0].pos;
+  // Installation is intentionally brief; the scene's dominant activity is the
+  // repeated movement of material from stock to the current building face.
+  work=Math.min(work,2.4);
+  tasks.push({id,label,stage,parts:parts.map((x,i)=>({...x,id:`${id}-${i}`})),work,progress:0,owner:null,driver:null,done:false,material:'timber',amount:1,used:0,supply:'stock',crew:[],needsLift:false,heavy:false,specialist:false,mixed:0,padSlot:0,site:site??[p[0]<0?-5.35:5.35,stage>=4?3.3:0,p[2]],});
  }
  const box=(size:V3,pos:V3,color=FRAME,rotation?:V3,glass=false)=>({size,pos,color,rotation,glass});
  for(let i=0;i<5;i++) add(0,`基础 · ${i+1} 区`,[box([1.8,.3,7],[-3.6+i*1.8,.15,0],'#c0bbae')],[-3.6+i*1.8,0,-4.4],7);
@@ -78,55 +81,71 @@ export function blueprint(): Task[] {
   t.material=t.stage===0?'concrete':t.label.includes('墙')?'brick':t.label.includes('窗')||t.label.includes('门框')?'fittings':t.label.includes('楼梯')||t.label==='搭建屋架'?'timber':t.stage===1||t.stage===4?'steel':t.stage===3||t.stage===6||t.label.includes('屋脊')||t.label.includes('雨棚')?'panel':'concrete';
   t.amount=t.material==='brick'?3:t.stage===0?3:t.label.includes('楼梯')?3:t.label==='搭建屋架'?2:1;
   t.heavy=/横梁|侧梁|楼板|屋架|金属屋面/.test(t.label);
-  t.needsLift=t.site[1]>0||t.material==='steel';
+  // Ground-floor work is delivered by cart and hand; the crane starts at level two.
+  t.needsLift=t.site[1]>0;
  }
  return tasks.sort((a,b)=>a.stage-b.stage);
 }
 export type CraneState={task:string|null;phase:number;elapsed:number;pos:V3;from:V3;load:boolean;lifts:number};
 export class Simulation {
  tasks=blueprint(); workers:Worker[]=[]; time=0; paused=false; speed=1; complete=false; seed=7281;
- events:string[]=['施工队到场：材料配送 → 搅拌 / 吊装 → 协作施工'];
+ events:string[]=['施工流程：运输材料 → 到建筑边施工'];
  stock={} as Record<MaterialKind,number>;initialStock={} as Record<MaterialKind,number>;
- cartPos:V3=[-9.5,0,-9];cartHeading=0;mixerPos:V3=[...MIXER];mixerAngle=0;
+ cartPos:V3=[-9.5,0,-9];cartHeading=0;cart2Pos:V3=[-16.1,0,-5.7];cart2Heading=0;mixerPos:V3=[...MIXER];mixerAngle=0;
  travelOwner:number|null=null; cartTurning=false;
  private planned=new Set<number>();private stairOwner:number|null=null;
  private blockedSince=new Map<number,number>();
  private yieldTargets=new Map<number,V3>();
  private workSlots=new Map<string,number>();
+ private nextBuilder=2;
  routeError='';private routeRetry=new Map<number,number>();private delivered=new Set<string>();
  crane:CraneState={task:null,phase:0,elapsed:0,pos:[PAD[0],10,PAD[2]],from:[PAD[0],10,PAD[2]],load:false,lifts:0};
  constructor(){
   for(const kind of Object.keys(MATERIALS) as MaterialKind[]){const needed=this.tasks.filter(t=>t.material===kind).reduce((n,t)=>n+t.amount,0);this.stock[kind]=needed+Math.max(1,Math.ceil(needed*.1));this.initialStock[kind]=this.stock[kind];}
-  this.workers=COLORS.map((color,i)=>({id:i,role:ROLES[i],buildingId:'house-001',color,pos:i===0?[-9.5,0,-10.1]:[13.5,0,-8+i*1.2],state:'idle',task:null,path:[],stamina:0,restAfter:38+this.random()*22,restLeft:0,heading:0,phase:i,completed:0,worked:0,timer:0,assist:null,assisted:0}));
+  this.workers=COLORS.map((color,i)=>({id:i,role:i<2?'运输工':'建筑工',buildingId:'house-001',color,pos:i===0?[-9.5,0,-10.1]:i===1?[-16.1,0,-6.8]:[13.5,0,-8+i*1.2],state:'idle',task:null,path:[],heading:0,phase:i,completed:0,worked:0,timer:0}));
  }
  random(){this.seed=(this.seed*1664525+1013904223)>>>0;return this.seed/4294967296;}
  get stage(){return this.tasks.find(t=>!t.done)?.stage??8;}
  get progress(){return this.tasks.reduce((s,t)=>s+t.progress,0)/this.tasks.reduce((s,t)=>s+t.work,0);}
  log(s:string){this.events.unshift(s);this.events=this.events.slice(0,4);}
  task(w:Worker){return this.tasks.find(t=>t.id===w.task);}
+ cartOf(id:number):V3{return id===1?this.cart2Pos:this.cartPos;}
+ cartHeadingOf(id:number){return id===1?this.cart2Heading:this.cartHeading;}
+ setCart(id:number,pos:V3,heading?:number){if(id===1){this.cart2Pos=pos;if(heading!==undefined)this.cart2Heading=heading;}else{this.cartPos=pos;if(heading!==undefined)this.cartHeading=heading;}}
+ groundDropPoint(t:Task):V3{const lanes=t.driver===1?[-2,-5,-8]:[2,5,8];return [lanes[t.padSlot]??lanes[0],0,-8.7];}
+ // Vehicles stop on the unobstructed outer service road. Pallets are set down
+ // one metre inward during the unloading animation; carts never have to enter
+ // the narrow pedestrian pickup pockets.
+ cartDropPoint(t:Task):V3{const lanes=t.driver===1?[-2,-5,-8]:[2,5,8];return [lanes[t.padSlot]??lanes[0],0,-10.5];}
+ builderReturnPoint(_t:Task,w:Worker):V3{return [10,0,(w.id-3)*2];}
  get inventory(){return (Object.keys(MATERIALS) as MaterialKind[]).map(kind=>{
   let transit=0,site=0,installed=0;
   for(const t of this.tasks.filter(t=>t.material===kind)){installed+=t.used;const remaining=t.amount-t.used;if(['cart','transfer','lifting','handcarry'].includes(t.supply))transit+=remaining;else if(['atLift','atMixer','mixing','ready','landed'].includes(t.supply))site+=remaining;}
   const required=this.tasks.filter(t=>t.material===kind).reduce((sum,t)=>sum+t.amount,0);
   return {kind,name:MATERIALS[kind].name,initial:this.initialStock[kind],required,surplus:this.initialStock[kind]-required,stock:this.stock[kind],transit,site,installed};
  });}
- supplyPoint(t:Task):V3{if(t.supply==='handcarry')return [...this.workers[t.owner!].pos];if(this.delivered.has(t.id))return this.workSupplyPoint(t);return [...(t.site[1]>4?LANDINGS[1]:t.site[1]>1?LANDINGS[0]:GROUND_BAY)];}
+ supplyPoint(t:Task):V3{
+  if(t.supply==='handcarry')return [...this.workers[t.owner!].pos];
+  if(t.needsLift){const p:V3=[...((t.site[1]>4)?LANDINGS[1]:LANDINGS[0])];p[0]+=(t.padSlot-1)*.8;return p;}
+  if(t.driver!==null||this.delivered.has(t.id))return this.groundDropPoint(t);
+  return [...GROUND_BAY];
+ }
  workSupplyPoint(t:Task):V3{if(t.label==='整理场地')return [-4.5,0,-4.5];if(t.label==='安装入口台阶')return [-1.2,0,-4.5];const p:V3=[...t.site];if(Math.abs(p[2])>3.8)p[2]=Math.sign(p[2])*3.8;else p[0]=Math.sign(p[0])*4.72;return p;}
  padPoint(_t:Task):V3{return [...PAD];}
  cargoPoint(t:Task):V3{
   const arc=(a:V3,b:V3,f:number):V3=>{f=Math.max(0,Math.min(1,f));const high=Math.max(a[1],b[1])+.35;if(f<.25)return [a[0],a[1]+(high-a[1])*f*4,a[2]];if(f<.65){const u=(f-.25)/.4;return [a[0]+(b[0]-a[0])*u,high,a[2]+(b[2]-a[2])*u];}return [b[0],high+(b[1]-high)*(f-.65)/.35,b[2]];};
   if(t.pickupTime!==undefined&&t.pickupFrom){const w=this.workers[t.owner!];return arc(t.pickupFrom,[w.pos[0],w.pos[1]+1.45,w.pos[2]],this.time-t.pickupTime);}
   if(t.dropTime!==undefined&&t.dropFrom){const p=this.workSupplyPoint(t);return arc(t.dropFrom,[p[0],p[1]+.12,p[2]],this.time-t.dropTime);}
-  const courier=this.workers[0],hand:V3=[courier.pos[0],courier.pos[1]+1.45,courier.pos[2]];
+  const courier=this.workers[t.driver??0],cart=this.cartOf(courier.id),hand:V3=[courier.pos[0],courier.pos[1]+1.45,courier.pos[2]];
   if(courier.task===t.id&&courier.state==='unloading'){
-   const destination=t.needsLift?PAD:GROUND_BAY;
-   const a:V3=t.supply==='cart'?[this.cartPos[0],.51,this.cartPos[2]]:hand,b:V3=t.supply==='cart'?hand:[destination[0],.12,destination[2]];
+   const destination=t.needsLift?PAD:this.groundDropPoint(t);
+   const a:V3=[cart[0],.51,cart[2]],b:V3=[destination[0],.12,destination[2]];
    const f=Math.max(0,Math.min(1,1-courier.timer/.8));return [a[0]+(b[0]-a[0])*f,a[1]+(b[1]-a[1])*f+Math.sin(f*Math.PI)*.8,a[2]+(b[2]-a[2])*f];
   }
   if(t.supply==='transfer')return hand;
   const p=t.supply==='atLift'?this.padPoint(t):this.supplyPoint(t);return [p[0],p[1]+(t.supply==='handcarry'?1.45:.12),p[2]];
  }
- pickupPoint(t:Task,w:Worker):V3{const p=this.supplyPoint(t);p[0]+=(t.crew.indexOf(w.id)-(t.crew.length-1)/2)*.8;p[2]+=p[1]>.1?.95:-1;return p;}
+ pickupPoint(t:Task,w:Worker):V3{const p=this.supplyPoint(t);p[0]-=(t.crew.indexOf(w.id)-(t.crew.length-1)/2)*.8;p[2]+=.95;return p;}
  ready(t:Task){return t.stage===this.stage&&!(/横梁|侧梁/.test(t.label)&&this.tasks.some(a=>a.stage===t.stage&&a.label==='安装承重柱'&&!a.done))&&!(t.label.includes('窗')&&!t.label.includes('墙')&&this.tasks.some(a=>a.stage===t.stage&&a.label.includes('墙')&&!a.done&&a.site.every((v,i)=>v===t.site[i])))&&!(t.label==='铺设金属屋面'&&this.tasks.some(a=>a.label==='搭建屋架'&&!a.done));}
  // Physical routes, not post-render displacement. The cart cannot enter stairs.
  route(from:V3,to:V3,radius=RADIUS,extra:Solid[]=[]):V3[]{
@@ -140,13 +159,19 @@ export class Simulation {
   points.push(...floor(STAIRS[j],to));return points;
  }
  go(w:Worker,to:V3,state:WorkerState){w.path=[[...to]];w.state=state;this.planned.delete(w.id);}
- private pushing(w:Worker){return w.id===0&&['material','carrying'].includes(w.state);}
- carryingLoad(w:Worker){return w.state==='unloadTrip'||(w.state==='handcarry'&&this.task(w)?.owner===w.id);}
+ private pushing(w:Worker){return w.id<2&&['material','carrying'].includes(w.state);}
+ // Hand-carried parcels and the two personal carts stay inside the worker's
+ // normal clearance envelope. Only the bulk unload trip needs tall-load
+ // clearance; treating worker 0 as if they carried the whole batch used to
+ // create a false 2.65 m obstacle at the stair entrance and deadlock the crew.
+ carryingLoad(w:Worker){return w.state==='unloadTrip';}
  private dynamicObstacles(w:Worker):Solid[]{
   const result:Solid[]=this.workers.filter(a=>a.id!==w.id).map(a=>({id:'worker-'+a.id,size:[.68,1.35,.68],pos:[a.pos[0],a.pos[1]+.7,a.pos[2]],color:'invisible'}));
-  if(w.id!==0)result.push({id:'cart-clearance',size:[3,1.25,3],pos:[this.cartPos[0],.7,this.cartPos[2]],color:'invisible'});
-  else if(!this.pushing(w))result.push({id:'parked-cart',size:[1.1,1.25,1.2],pos:[this.cartPos[0],.7,this.cartPos[2]],color:'invisible',rotation:this.cartHeading});
-  for(const t of this.tasks.filter(t=>['ready','atLift','atMixer','mixing','landed'].includes(t.supply))){const p=this.cargoPoint(t),height=t.material==='fittings'?(t.label.includes('门框')?1.06:.74):.27*t.amount;result.push({id:'cargo-'+t.id,size:[.78,height,.44],pos:[p[0],p[1]+height/2,p[2]],color:'invisible'});}
+  for(const id of [0,1])if(id!==w.id||!this.pushing(w)){const p=this.cartOf(id);result.push({id:'cart-clearance-'+id,size:[1.1,1.25,1.2],pos:[p[0],.7,p[2]],color:'invisible',rotation:this.cartHeadingOf(id)});}
+  // Ready pallets are destinations, not navigation blockers: the assigned
+  // builder must be able to approach and pick one up. Separate unloading slots
+  // prevent those pallets from overlapping one another.
+  for(const t of this.tasks.filter(t=>['atLift','atMixer','mixing','landed'].includes(t.supply))){const p=this.cargoPoint(t),height=t.material==='fittings'?(t.label.includes('门框')?1.06:.74):.27*t.amount;result.push({id:'cargo-'+t.id,size:[.78,height,.44],pos:[p[0],p[1]+height/2,p[2]],color:'invisible'});}
   return result;
  }
  private yieldWay(w:Worker){
@@ -172,49 +197,52 @@ export class Simulation {
   return false;
  }
  move(w:Worker,dt:number){
-  const pushing=this.pushing(w),radius=pushing?CART_RADIUS:this.carryingLoad(w)?.43:RADIUS;
+  if(this.travelOwner!==null&&this.travelOwner!==w.id)return;
+  const pushing=this.pushing(w),radius=pushing?CART_RADIUS:RADIUS;
   if(!this.planned.has(w.id)){
    if(this.time<(this.routeRetry.get(w.id)??0))return;
-   const target=w.path[w.path.length-1],from=pushing?this.cartPos:w.pos;
+   const target=w.path[w.path.length-1],from=pushing?this.cartOf(w.id):w.pos;
    const extra=this.dynamicObstacles(w);
-   try{w.path=this.route(from,target,radius,extra);}catch(error){this.routeError=String(error);if(this.yieldWay(w))return;this.routeRetry.set(w.id,this.time+.6);return;}
+   try{w.path=this.route(from,target,radius,extra);this.routeError='';}catch(error){this.routeError=String(error);this.travelOwner=null;this.routeRetry.set(w.id,this.time+.6);return;}
    this.planned.add(w.id);
+   this.travelOwner=w.id;
   }
   const inStair=(p:V3)=>p[0]>6.65&&p[0]<8.95&&p[2]>-5.25&&p[2]<1.3;
   if(this.stairOwner!==null&&!inStair(this.workers[this.stairOwner].pos))this.stairOwner=null;
-  let remaining=dt*(pushing?2.2:2.6);
+  // Personal material runs are brisk and dominate the scene. A full upper-floor
+  // route must not leave already-arrived crew appearing parked for minutes.
+  let remaining=dt*(pushing?2.2:6.5);
   while(w.path.length&&remaining>0){
-   const from=pushing?this.cartPos:w.pos,t=w.path[0],dx=t[0]-from[0],dy=t[1]-from[1],dz=t[2]-from[2],d=Math.hypot(dx,dy,dz);
+   const from=pushing?this.cartOf(w.id):w.pos,t=w.path[0],dx=t[0]-from[0],dy=t[1]-from[1],dz=t[2]-from[2],d=Math.hypot(dx,dy,dz);
+   if(d<.001){w.path.shift();continue;}
    const heading=Math.atan2(dx,dz);
    if(pushing&&d>.002){
-    const angle=Math.atan2(Math.sin(heading-this.cartHeading),Math.cos(heading-this.cartHeading));
+    const cartHeading=this.cartHeadingOf(w.id),angle=Math.atan2(Math.sin(heading-cartHeading),Math.cos(heading-cartHeading));
     this.cartTurning=Math.abs(angle)>.02;
-    if(this.cartTurning){this.cartHeading+=Math.sign(angle)*Math.min(Math.abs(angle),dt*1.8);w.heading=this.cartHeading;w.pos=[this.cartPos[0]-Math.sin(this.cartHeading)*1.1,0,this.cartPos[2]-Math.cos(this.cartHeading)*1.1];return;}
+    if(this.cartTurning){const nextHeading=cartHeading+Math.sign(angle)*Math.min(Math.abs(angle),dt*1.8);this.setCart(w.id,from,nextHeading);w.heading=nextHeading;w.pos=[from[0]-Math.sin(nextHeading)*1.1,0,from[2]-Math.cos(nextHeading)*1.1];return;}
    }
    this.cartTurning=false;
    if(d>.001)w.heading=heading;
    const f=d<.001?1:Math.min(1,remaining/d),next:V3=[from[0]+dx*f,from[1]+dy*f,from[2]+dz*f];
-   if(!pushing&&inStair(next)&&!this.yieldTargets.has(w.id)){if(this.stairOwner!==null&&this.stairOwner!==w.id){this.yieldWay(w);return;}this.stairOwner=w.id;}
+   if(!pushing&&inStair(next)&&!this.yieldTargets.has(w.id)){if(this.stairOwner!==null&&this.stairOwner!==w.id){this.travelOwner=null;this.planned.delete(w.id);return;}this.stairOwner=w.id;}
    // Stair ramps are explicit supported links; ordinary motion never leaves a deck.
    const extra=this.dynamicObstacles(w);
    const height=this.carryingLoad(w)?2.65:1.4;
    if(!segmentClear(from,next,radius,height,true,extra)||extra.some(b=>intersects(next,radius,height,b))){
-    if(this.yieldWay(w))return;
-    // Re-plan on blockage; never push a mesh aside or step through another person.
-    if(Math.abs(from[1])<.05||Math.abs(from[1]-3.3)<.05||Math.abs(from[1]-6.2)<.05){this.planned.delete(w.id);this.routeRetry.set(w.id,this.time+.6);}
+    // A second cart or a newly unloaded pallet can appear after this route was
+    // planned. Release the movement token and re-plan around it; merely waiting
+    // here can deadlock both logistics lanes permanently.
+    this.travelOwner=null;this.planned.delete(w.id);this.routeRetry.set(w.id,this.time+.15);
     return;
    }
-   if(pushing){this.cartPos=next;w.pos=[next[0]-Math.sin(this.cartHeading)*1.1,0,next[2]-Math.cos(this.cartHeading)*1.1];}
+   if(pushing){this.setCart(w.id,next);const cartHeading=this.cartHeadingOf(w.id);w.pos=[next[0]-Math.sin(cartHeading)*1.1,0,next[2]-Math.cos(cartHeading)*1.1];}
    else w.pos=next;
    if(this.stairOwner===w.id&&!inStair(w.pos))this.stairOwner=null;
    if(d<=remaining+.00001){w.path.shift();remaining-=d;}else remaining=0;
   }
-  if(!w.path.length){this.planned.delete(w.id);if(this.stairOwner===w.id)this.stairOwner=null;const target=this.yieldTargets.get(w.id);if(target){this.yieldTargets.delete(w.id);this.go(w,target,w.state);}}
+  if(!w.path.length){this.travelOwner=null;this.planned.delete(w.id);if(this.stairOwner===w.id)this.stairOwner=null;const target=this.yieldTargets.get(w.id);if(target){this.yieldTargets.delete(w.id);this.go(w,target,w.state);}else if(['fetching','handcarry'].includes(w.state)&&w.task){const next=this.workers.filter(a=>a.task===w.task&&a.path.length).sort((a,b)=>a.id-b.id)[0];if(next)this.travelOwner=next.id;}}
  }
- restPoint(w:Worker):V3{return [10.05,0,-6.1+w.id*.8];}
- parkPoint(w:Worker):V3{return [13.5,0,-8+w.id*1.2];}
- rest(w:Worker){this.go(w,this.restPoint(w),'restTrip');}
- effort(w:Worker,dt:number){w.stamina+=dt;w.worked+=dt;}
+ effort(w:Worker,dt:number){w.worked+=dt;}
  advanceCrane(dt:number,w:Worker){
   const c=this.crane,t=this.tasks.find(t=>t.id===c.task);if(!t)return;
   const pad=this.padPoint(t),target=this.supplyPoint(t);
@@ -234,89 +262,103 @@ export class Simulation {
  }
  advance(dt:number){
   if(this.paused)return;this.time+=dt;
+  if(this.stairOwner!==null&&!this.workers[this.stairOwner].path.length)this.stairOwner=null;
+  // Never leave a reassigned worker standing on a stair flight. Evacuate the
+  // nearest landing first, before dispatching any opposing stair traffic.
+  const stranded=this.workers.find(w=>!w.path.length&&w.pos[1]>.2&&w.pos[0]>6.65&&w.pos[0]<8.95&&w.pos[2]>-5.25&&w.pos[2]<1.3);
+  if(stranded){
+   const landing=[...STAIRS].filter(p=>[1.65,3.3,4.75,6.2].some(y=>Math.abs(p[1]-y)<.05)).sort((a,b)=>Math.hypot(...a.map((v,i)=>v-stranded.pos[i]))-Math.hypot(...b.map((v,i)=>v-stranded.pos[i])))[0];
+   if(Math.hypot(...landing.map((v,i)=>v-stranded.pos[i]))>.08){this.go(stranded,landing,stranded.state);this.planned.add(stranded.id);this.travelOwner=stranded.id;this.stairOwner=stranded.id;}
+  }
   for(const w of this.workers){
    w.phase+=dt;
+   if(w.state==='supporting'){
+    const t=this.task(w),specialistNeeded=w.id===1&&!!t&&['atMixer','atLift'].includes(t.supply),courierNeeded=w.id===0&&t?.supply==='stock';
+    if(!t||specialistNeeded||courierNeeded||t.supply==='used'){
+     w.task=null;
+     if(w.path.length&&!specialistNeeded)w.state='waiting';
+     else{w.state='idle';w.path=[];this.planned.delete(w.id);if(this.travelOwner===w.id)this.travelOwner=null;}
+    }
+    else this.effort(w,dt);
+   }
    const wasMoving=w.path.length>0;
-   if(wasMoving){this.move(w,dt);if(w.id===0&&this.pushing(w))this.effort(w,dt*.35);if(w.path.length)continue;
-    if(w.state==='toCart'){const p=MATERIALS[this.task(w)!.material].pos;this.go(w,[p[0]+3.5,0,p[2]],'material');continue;}
-    if(w.state==='prepTrip')w.state='preparing';
+   if(wasMoving){this.move(w,dt);if(w.id<2&&this.pushing(w))this.effort(w,dt*.35);if(w.path.length)continue;
+    if(w.state==='toCart'){const p=MATERIALS[this.task(w)!.material].pos;this.go(w,[p[0]+(w.id===1?-3.1:3.5),0,p[2]],'material');continue;}
     if(w.state==='material'){w.state='loading';w.timer=1.1;}
     if(w.state==='carrying'){w.state='unloading';w.timer=.8;}
     if(w.state==='unloadTrip'){w.state='unloading';w.timer=.8;}
-    if(w.state==='restTrip'){w.state='resting';w.restLeft=6+this.random()*6;}
     if(w.state==='toControl'){w.state='operating';const t=this.task(w)!;this.crane.task=t.id;this.crane.phase=0;this.crane.elapsed=0;this.crane.from=[...this.crane.pos];}
-    if(w.state==='fetching'){const t=this.task(w)!;w.state='waitingPartner';if(t.crew.every(id=>this.workers[id].state==='waitingPartner'&&!this.workers[id].path.length)){t.pickupFrom=this.cargoPoint(t);t.pickupTime=this.time;t.supply='handcarry';}continue;}
-    if(w.state==='handcarry'){const t=this.task(w)!;w.state='waitingPartner';if(t.crew.every(id=>this.workers[id].state==='waitingPartner'&&!this.workers[id].path.length)){t.dropFrom=this.cargoPoint(t);t.dropTime=this.time;}continue;}
-    if(w.state==='movingWork'||w.state==='returning'){const t=this.task(w)!;w.state=w.id===1?'mixing':'working';if(w.id===1)t.supply='mixing';}
+    if(w.state==='fetching'){w.state='pickupLoading';w.timer=.65;continue;}
+    if(w.state==='handcarry'){w.state='working';continue;}
+    if(w.state==='movingWork'){const t=this.task(w)!;w.state='mixing';t.supply='mixing';}
+    if(w.state==='returning'){w.state='idle';w.task=null;}
    }
    if(w.state==='finished')continue;
-   if(w.state==='resting'){w.restLeft-=dt;if(w.restLeft<=0){w.stamina=0;w.restAfter=38+this.random()*22;const t=this.task(w);if(t&&w.id>=2)this.go(w,this.workerPoint(t,w),'returning');else w.state='idle';}continue;}
    if(w.state==='loading'){
-    w.timer-=dt;if(w.timer<=0){const t=this.task(w)!;if(this.stock[t.material]<t.amount){w.state='waitingSupply';this.log(MATERIALS[t.material].name+'不足，等待补料');continue;}
-     this.stock[t.material]-=t.amount;t.supply='cart';this.log(`取走 ${t.amount} 组${MATERIALS[t.material].name}，库存剩 ${this.stock[t.material]}`);this.go(w,t.needsLift?[PAD[0]-2.1,0,PAD[2]]:[GROUND_BAY[0],0,GROUND_BAY[2]+2.5],'carrying');}continue;
+    const t=this.task(w)!;w.timer-=dt;if(w.timer<=0){if(this.stock[t.material]<t.amount){w.state='waitingSupply';this.log(MATERIALS[t.material].name+'不足，等待补料');continue;}
+     this.stock[t.material]-=t.amount;t.supply='cart';this.log(`运输车 ${w.id+1} 取走 ${t.amount} 组${MATERIALS[t.material].name}`);const p=t.needsLift?PAD:this.cartDropPoint(t);this.go(w,[p[0],0,p[2]],'carrying');}continue;
    }
    if(w.state==='waitingSupply'){const t=this.task(w);if(w.id===0&&t&&this.stock[t.material]>=t.amount){w.state='loading';w.timer=.2;}continue;}
-   if(w.state==='unloading'){w.timer-=dt;if(w.timer<=0){const t=this.task(w)!;if(t.supply==='cart'){t.supply='transfer';const p=t.needsLift?PAD:GROUND_BAY;this.go(w,[p[0],0,p[2]-.95],'unloadTrip');continue;}t.supply=t.needsLift?'atLift':t.material==='concrete'?'atMixer':'ready';w.task=null;w.completed++;w.state='idle';}else continue;}
+   if(w.state==='pickupLoading'){const t=this.task(w)!;w.timer-=dt;if(w.timer<=0){t.supply='handcarry';this.go(w,this.workerPoint(t,w),'handcarry');}continue;}
+   if(w.state==='unloading'){const t=this.task(w)!;w.timer-=dt;if(w.timer<=0){t.supply=t.needsLift?'atLift':'ready';if(t.material==='concrete')t.mixed=3;this.delivered.add(t.id);w.task=null;w.completed++;w.state='idle';w.path=[];this.planned.delete(w.id);if(this.travelOwner===w.id)this.travelOwner=null;}else continue;}
    if(w.state==='operating'){this.advanceCrane(dt,w);if(w.state==='operating')continue;}
    if(w.state==='mixing'){const t=this.task(w)!;t.mixed+=dt;this.mixerAngle+=dt*5;this.effort(w,dt);if(t.mixed>=3){t.supply='ready';w.completed++;w.task=null;w.state='idle';}else continue;}
-   if(w.state==='working'||w.state==='waitingPartner')continue;
-   if(w.state==='idle'||w.state==='waiting'||w.state==='preparing'){
-    if(this.complete){w.assist=null;this.go(w,this.restPoint(w),'finished');continue;}
-    if(w.stamina>=w.restAfter){w.assist=null;this.rest(w);continue;}
-    if(w.id===0){
-     const bayOccupied=this.tasks.some(t=>t.supply!=='stock'&&!t.done&&!this.delivered.has(t.id));
-     const t=!bayOccupied?this.tasks.find(t=>t.supply==='stock'&&this.ready(t)):undefined;
-     if(t){const used=this.tasks.filter(a=>['collecting','cart','atLift','lifting'].includes(a.supply)&&a.needsLift).map(a=>a.padSlot);t.padSlot=[0,1,2,3,4].find(n=>!used.includes(n))??0;t.supply='collecting';w.task=t.id;this.go(w,[this.cartPos[0]-Math.sin(this.cartHeading)*1.1,0,this.cartPos[2]-Math.cos(this.cartHeading)*1.1],'toCart');}else w.state='waiting';
-    }else if(w.id===1){
-     const t=this.tasks.find(t=>t.supply==='atMixer')??this.tasks.find(t=>t.supply==='atLift');
-     if(t){w.task=t.id;if(t.supply==='atMixer')this.go(w,[MIXER[0],0,MIXER[2]-1.4],'movingWork');else this.go(w,CRANE_CONTROL,'toControl');}else w.state='waiting';
+   if(w.state==='working'||w.state==='waitingPartner'||w.state==='supporting')continue;
+   if(w.state==='idle'||w.state==='waiting'){
+    if(this.complete){w.state='finished';w.path=[];this.planned.delete(w.id);if(this.travelOwner===w.id)this.travelOwner=null;continue;}
+    if(w.id<2){
+     const machineTask=w.id===1?this.tasks.find(t=>t.supply==='atLift'):undefined;
+     if(machineTask){w.task=machineTask.id;if(machineTask.supply==='atMixer')this.go(w,[MIXER[0],0,MIXER[2]-1.4],'movingWork');else{w.state='operating';this.crane.task=machineTask.id;this.crane.phase=0;this.crane.elapsed=0;this.crane.from=[...this.crane.pos];}continue;}
+     const liftInTransit=this.tasks.some(t=>t.needsLift&&!t.done&&!['stock','ready','handcarry','used'].includes(t.supply));
+     const activeSlots=this.tasks.filter(t=>!t.done&&t.driver===w.id&&t.needsLift===false&&!['stock','used'].includes(t.supply)).map(t=>t.padSlot),slot=[0,1,2].find(n=>!activeSlots.includes(n));
+     const upperSlots=this.tasks.filter(t=>!t.done&&t.needsLift&&t.site[1]<=4&&!['stock','used'].includes(t.supply)).map(t=>t.padSlot),upperHighSlots=this.tasks.filter(t=>!t.done&&t.needsLift&&t.site[1]>4&&!['stock','used'].includes(t.supply)).map(t=>t.padSlot);
+     const t=this.tasks.find(t=>t.supply==='stock'&&this.ready(t)&&!(w.id===1&&t.needsLift)&&!(t.needsLift&&liftInTransit)&&(t.needsLift?([0,1,2].some(n=>!(t.site[1]>4?upperHighSlots:upperSlots).includes(n))):slot!==undefined)&&!this.tasks.some(a=>a.driver!==w.id&&a.material===t.material&&a.supply==='collecting'));
+     if(t){t.driver=w.id;t.padSlot=t.needsLift?([0,1,2].find(n=>!(t.site[1]>4?upperHighSlots:upperSlots).includes(n))??0):slot!;t.supply='collecting';w.task=t.id;const cart=this.cartOf(w.id),heading=this.cartHeadingOf(w.id);this.go(w,[cart[0]-Math.sin(heading)*1.1,0,cart[2]-Math.cos(heading)*1.1],'toCart');}else w.state='waiting';
     }else w.state='waiting';
    }
   }
-  for(const t of this.tasks){
-   if(t.pickupTime!==undefined&&this.time-t.pickupTime>=1){t.pickupTime=undefined;t.pickupFrom=undefined;for(const id of t.crew)this.go(this.workers[id],this.workerPoint(t,this.workers[id]),'handcarry');}
-   if(t.dropTime!==undefined&&this.time-t.dropTime>=1){t.dropTime=undefined;t.dropFrom=undefined;t.supply='ready';this.delivered.add(t.id);}
-  }
-  // Assign actual work independently from delivery and equipment work.
+  for(const t of this.tasks)if(t.supply==='handcarry'&&t.crew.some(id=>this.workers[id].state==='working'))t.supply='ready';
+  // Once material reaches the site, the entire crew carries it directly to the
+  // building face. There is no remote preparation or waiting-area phase.
   for(const t of this.tasks.filter(t=>!t.done&&t.owner===null&&t.supply==='ready'&&this.ready(t))){
-   const available=this.workers.filter(w=>w.id>=2&&w.task===null&&!w.path.length&&['idle','waiting','preparing'].includes(w.state)&&w.stamina<w.restAfter);
-   let team:Worker[]=[];
-   if(t.heavy&&!available.some(w=>w.id===2)||t.heavy&&!available.some(w=>w.id===3))continue;
-   if(t.specialist&&!available.some(w=>w.id===4))continue;
-   // Two people fit the marked work envelope; the third prepares the next job.
-   // Qualifications constrain the lead, not a permanent one-worker/one-task lock.
-   if(t.heavy)team=available.filter(w=>w.id===2||w.id===3);
-   else if(t.specialist)team=[available.find(w=>w.id===4)!,...available.filter(w=>w.id!==4).sort((a,b)=>a.completed-b.completed).slice(0,1)];
-   else team=available.sort((a,b)=>a.completed-b.completed).slice(0,2);
-   if(!team.length)continue;
-   t.owner=team[0].id;t.crew=team.map(w=>w.id);team.forEach((w,i)=>this.workSlots.set(t.id+'/'+w.id,(i-(team.length-1)/2)*.85));
-   for(const w of team){w.assist=null;w.task=t.id;this.go(w,this.pickupPoint(t,w),'fetching');}
+   const builders=this.workers.slice(2),available=builders.filter(w=>w.task===null&&!w.path.length&&['idle','waiting'].includes(w.state));
+   const w=available.sort((a,b)=>((a.id-this.nextBuilder+3)%3)-((b.id-this.nextBuilder+3)%3))[0];
+   if(!w)continue;
+   this.nextBuilder=2+(w.id-1)%3;
+   t.owner=w.id;t.crew=[w.id];this.workSlots.set(t.id+'/'+w.id,0);
+   // Every builder owns a separate job: local unloading point → its own work
+   // face → completion. No crew barrier and no waiting for colleagues.
+   w.task=t.id;this.go(w,this.pickupPoint(t,w),'fetching');this.travelOwner=w.id;
   }
-  // A heavy task advances once, only while both assigned builders are present.
+  // The marked facade envelope has room for its assigned installation crew.
+  // Everyone else assists with tools/material preparation without trying to
+  // cross through that crew on the narrow scaffold.
+  // During the vehicle leg, free workers head to the material collection aisle.
+  // They do not wait at the building and never add remote construction progress.
+  // Each job has one builder. Work begins only after that builder physically
+  // carried the parcel from the unloading point to this work face.
   for(const t of this.tasks.filter(t=>!t.done&&t.crew.length>0)){
-   const team=t.crew.map(id=>this.workers[id]);const present=team.every(w=>!w.path.length&&['working','waitingPartner'].includes(w.state));
-   if(!present||t.supply!=='ready'){for(const w of team)if(w.state==='working')w.state='waitingPartner';continue;}
+   const team=t.crew.map(id=>this.workers[id]);
+   const present=team.filter(w=>!w.path.length&&(w.state==='working'||w.state==='waitingPartner'));
+   if(present.length!==team.length||t.supply!=='ready')continue;
    for(const w of team)w.state='working';
-   const step=Math.min(dt*(1+t.prepared/t.work)*(1+.25*Math.max(0,team.length-(t.heavy?2:1))),t.work-t.progress);t.progress+=step;t.used=t.amount*t.progress/t.work;for(const w of team)this.effort(w,dt);
-   if(t.progress>=t.work-1e-6){t.progress=t.work;t.used=t.amount;t.done=true;t.supply='used';t.owner=null;for(const w of team){w.completed++;w.task=null;this.go(w,this.parkPoint(w),'waiting');}t.crew=[];}
-   else {for(const w of team)if(w.stamina>=w.restAfter)this.rest(w);}
-  }
-  // A shared preparation queue, not one job permanently tied to one person.
-  // Preparing jigs, tool sets and setting-out plans is real prerequisite work:
-  // it earns up to 40% installation-rate improvement, without creating materials.
-  for(const w of this.workers){
-   if(w.task!==null||w.path.length||!['idle','waiting','preparing'].includes(w.state)||this.complete)continue;
-   if(w.stamina>=w.restAfter){w.assist=null;this.rest(w);continue;}
-   let t=this.tasks.find(t=>t.id===w.assist&&!t.done&&t.prepared<t.work*.4-1e-6);
-   if(!t){w.assist=null;t=this.tasks.find(t=>!t.done&&t.prepared<t.work*.4-1e-6&&!this.workers.some(a=>a.id!==w.id&&a.assist===t.id));}
-   if(!t){w.state='waiting';if(w.id<2&&Math.hypot(...w.pos.map((v,i)=>v-this.parkPoint(w)[i]))>.05)this.go(w,this.parkPoint(w),'waiting');continue;}
-   w.assist=t.id;
-   const station=this.parkPoint(w);
-   if(Math.hypot(...w.pos.map((v,i)=>v-station[i]))>.05){this.go(w,station,'prepTrip');continue;}
-   w.state='preparing';w.heading=Math.PI/2;
-   const amount=Math.min(dt*.04,t.work*.4-t.prepared);t.prepared+=amount;w.assisted+=amount;this.effort(w,dt*.3);
+   const step=Math.min(dt,t.work-t.progress);t.progress+=step;t.used=t.amount*t.progress/t.work;for(const w of present)this.effort(w,dt);
+   if(t.progress>=t.work-1e-6){t.progress=t.work;t.used=t.amount;t.done=true;t.supply='used';t.owner=null;for(const w of team){w.completed++;this.planned.delete(w.id);if(this.travelOwner===w.id)this.travelOwner=null;this.go(w,this.builderReturnPoint(t,w),'returning');}t.crew=[];}
   }
   if(!this.complete&&this.tasks.every(t=>t.done)){this.complete=true;this.log('房屋交付：材料已逐项计入建筑，剩余库存保留');}
  }
- workerPoint(t:Task,w:Worker):V3{const p:V3=[...t.site];const lateral=this.workSlots.get(t.id+'/'+w.id)??0;if(Math.abs(p[2])>3.8){p[0]+=lateral;p[2]=Math.sign(p[2])*(t.label==='整理场地'?5:4.5);}else{p[2]+=lateral;p[0]=Math.sign(p[0]||1)*5.5;}return p;}
+ workerPoint(t:Task,w:Worker):V3{
+  if(t.label==='整理场地')return [-1+(w.id-3),0,-4.8];
+  const p:V3=[...t.site];
+  if(Math.abs(p[2])>3.8){
+   p[0]=Math.max(-3.6,Math.min(3.6,p[0]));
+   p[0]+=(3-w.id)*1.2+.3;
+   const side=Math.sign(p[2]);
+   p[2]=side*(t.label==='整理场地'?4.9:4.55)+side*(w.id-3)*.3;
+  }else{
+   p[2]+=(3-w.id)*1.2;
+   p[0]=Math.sign(p[0]||1)*5.5;
+  }
+  return p;
+ }
 }

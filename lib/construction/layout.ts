@@ -26,10 +26,6 @@ solid('crane-base',[2,.35,2],[-6.6,.27,5.3],'#a6a899');
 solid('crane-mast',[.95,11.8,.95],[-6.6,5.9,5.3],'invisible');
 solid('mixer-envelope',[1.1,1.3,1.3],[12,.7,5],'invisible');
 solid('control',[.85,.68,.5],[CONTROL[0],.44,CONTROL[2]+.8],'#587969');
-for(const x of [9.5,12])for(const z of [-6.5,-2.5])solid('shelter-post',[.1,2.5,.1],[x,1.3,z],'#e1ddc6');
-for(let i=0;i<8;i++)solid('shelter-roof',[2.8,.12,.53],[10.75,2.57,-6.4+i*.53],i%2?'#d9d7bd':'#557b6b');
-solid('bench',[.5,.55,4.5],[11.15,.3,-4.5],'#9b714b');
-for(let i=0;i<5;i++)solid(`prep-bench-${i}`,[.55,.7,.75],[14.25,.45,-8+i*1.2],'#816347');
 for(const [i,[x,z]] of [[-4,-6],[-7,4],[4,-6],[5,-7]].entries())solid(`cone-${i}`,[.48,.7,.48],[x,.4,z],'invisible');
 solid('toolbox',[.7,.45,.5],[-7,.35,-5],'#45665c');
 // Decks are wider than two workers; all walk edges are actual supported surfaces.
@@ -48,7 +44,11 @@ for(const y of [3.3,6.2]){
 }
 for(const [x,y,z] of LANDINGS){
  solid('receiving-deck',[3.2,.14,2],[x,y-.07,z],'#c5a169',true);
- solid('receiving-bridge',[2.8,.14,-4.5-z],[x,y-.07,(z-4.5)/2],'#aa9270',true);
+ // Bridge only the real gap between the facade walk (outer edge z=-5.4)
+ // and the landing (inner edge z+1). The former oversized slab extended
+ // through both surfaces, producing coplanar z-fighting at both levels.
+ const walkEdge=-5.4,landingEdge=z+1,bridgeLength=Math.abs(landingEdge-walkEdge);
+ solid('receiving-bridge',[2.8,.14,bridgeLength],[x,y-.07,(landingEdge+walkEdge)/2],'#aa9270',true);
  for(const side of [-1,1]){
   solid('receiving-rail',[.06,.06,-5.35-z],[x+side*1.35,y+.85,(z-5.35)/2],'#6a827b');
   solid('receiving-post',[.08,y,.08],[x+side*1.5,y/2,z-.9],'#6a827b');
