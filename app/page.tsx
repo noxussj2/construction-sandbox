@@ -1,25 +1,37 @@
 'use client';
-import { useEffect, useRef, useState } from 'react';
-import { Pause, Play, RotateCcw, Focus, HardHat, ChevronDown, ChevronUp, VolumeX, Sun, Check, Box, ArrowUpRight, MousePointer2, Package, Settings2, BrickWall, Hammer, Wrench } from 'lucide-react';
-import { Progress } from '@/components/ui/progress';
-import { AlertDialog, AlertDialogTrigger, AlertDialogContent, AlertDialogTitle, AlertDialogDescription, AlertDialogFooter, AlertDialogCancel, AlertDialogAction } from '@/components/ui/alert-dialog';
-import { registerSimulationTools } from '@/lib/construction/webmcp';
-import { Simulation, STAGES, type WorkerState } from '@/lib/construction/simulation';
-const ROLE_ICONS=[Package,Settings2,BrickWall,Hammer,Wrench];
-const STATE:Record<WorkerState,string>={fetching:'前往卸货点',handcarry:'搬往建筑',loading:'装车取料',unloading:'卸下材料',toCart:'返回车辆',returnCart:'空车返回材料区',operating:'操作吊机',waitingSupply:'等待材料与通道',idle:'领取下一批任务',material:'驶往材料区',carrying:'运往施工点',working:'正在施工',waiting:'本阶段任务已领完',pickupLoading:'装取已卸材料',finished:'施工完成'};
-const clock=(s:number)=>`${Math.floor(s/60).toString().padStart(2,'0')}:${Math.floor(s%60).toString().padStart(2,'0')}`;
+import {useEffect,useRef,useState} from 'react';
+import {Pause,Play,RotateCcw,Focus,HardHat} from 'lucide-react';
+import {AlertDialog,AlertDialogTrigger,AlertDialogContent,AlertDialogTitle,AlertDialogDescription,AlertDialogFooter,AlertDialogCancel,AlertDialogAction} from '@/components/ui/alert-dialog';
+import {Simulation} from '@/lib/construction/simulation';
+import {registerSimulationTools} from '@/lib/construction/webmcp';
+import type {Choreography} from '@/lib/construction/playback';
+const clock=(seconds:number)=>`${Math.floor(seconds/60).toString().padStart(2,'0')}:${Math.floor(seconds%60).toString().padStart(2,'0')}`;
+let choreography:Promise<Choreography>|undefined;
+function loadChoreography(){return choreography??=fetch('/playback/house.json').then(response=>{if(!response.ok)throw Error('施工动画加载失败');return response.json() as Promise<Choreography>;}).catch(error=>{choreography=undefined;throw error;});}
 export default function Home(){
- const host=useRef<HTMLDivElement>(null);const sim=useRef<Simulation|null>(null);const world=useRef<{resetView:()=>void;dispose:()=>void}|null>(null);const [epoch,setEpoch]=useState(0);const [,update]=useState(0);const [ready,setReady]=useState(false);const [error,setError]=useState('');const [expanded,setExpanded]=useState(false);
- useEffect(()=>{let gone=false;setReady(false);setError('');const s=new Simulation();sim.current=s;const unregister=registerSimulationTools(s,()=>update(x=>x+1));import('@/lib/construction/scene').then(({createWorld})=>{if(gone||!host.current)return;try{world.current=createWorld(host.current,s,()=>update(x=>x+1));setReady(true);}catch(e){setError(e instanceof Error&&/WebGL|context/i.test(e.message)?'浏览器暂不支持 WebGL，请开启硬件加速后重试。':'场景初始化失败，请重新加载。');console.error(e);}}).catch(e=>{setError('场景加载失败，请刷新重试。');console.error(e);});return()=>{unregister();gone=true;world.current?.dispose();world.current=null;};},[epoch]);
- const s=sim.current;const stage=s?.stage??0;const progress=(s?.progress??0)*100;const paused=s?.paused??false;
+ const host=useRef<HTMLDivElement>(null),fps=useRef<HTMLOutputElement>(null),sim=useRef<Simulation|null>(null);
+ const world=useRef<{resetView:()=>void;dispose:()=>void}|null>(null);
+ const [epoch,setEpoch]=useState(0),[,update]=useState(0),[ready,setReady]=useState(false),[error,setError]=useState('');
+ useEffect(()=>{
+  let gone=false;setReady(false);setError('');const s=new Simulation();sim.current=s;
+  const unregister=registerSimulationTools(s,()=>update(v=>v+1));
+  Promise.all([import('@/lib/construction/scene'),loadChoreography()]).then(([{createWorld},data])=>{
+   if(gone||!host.current)return;
+   world.current=createWorld(host.current,s,()=>update(v=>v+1),data,value=>{if(fps.current)fps.current.textContent=`${value} FPS`;});setReady(true);
+  }).catch(e=>{if(gone)return;setError(e instanceof Error?e.message:'加载失败');console.error(e);});
+  return()=>{gone=true;unregister();world.current?.dispose();world.current=null;};
+ },[epoch]);
+ const s=sim.current,paused=s?.paused??false,progress=Math.round((s?.progress??0)*100);
  return <main className="workbench">
-  <div ref={host} className="scene" aria-label="可旋转缩放的三维建筑工地" />
-  <header className="masthead"><div className="identity"><div className="brand-icon"><Box size={26} strokeWidth={1.4}/></div><div><div className="eyebrow">LITTLE BUILDERS</div><h1>筑城之间<span>自动建造演示</span></h1></div></div><div className="weather"><Sun size={19}/><span>晴朗 <b>24°</b></span><span className="separator"/><span className="live-state"><i className={paused?'paused':''}/>{s?.complete?'已竣工':paused?'已暂停':'建造进行中'}</span></div></header>
-  <section className="project-card"><div className="project-kicker"><span>PROJECT 001</span><span className="project-label">两层办公楼</span></div><h2>{s?.complete?'一砖一瓦，已成新家。':'从一片空地开始。'}</h2><p>五位工人，一栋房子。看建造慢慢发生。</p><div className="project-stats"><div><strong>{Math.round(progress)}<small>%</small></strong><span>建造进度</span></div><div><strong>{clock(s?.time??0)}</strong><span>工地时间</span></div><div><strong>5<small> 人</small></strong><span>施工团队</span></div></div><Progress value={progress} aria-label="建造总进度" className="build-progress"/><div className="current-stage"><span>{s?.complete?<Check size={14}/>:<span className="stage-pulse"/>}{s?.complete?'建造完成':STAGES[stage]}</span><span>{Math.min(stage+1,8)} / 8</span></div><div className="delivery-event">{s?.events[0]}</div></section>
-  <aside className={`crew-card ${expanded?'':'collapsed'}`}><button className="crew-heading" onClick={()=>setExpanded(!expanded)} aria-expanded={expanded}><span><HardHat size={18}/>施工队 <small>05</small></span>{expanded?<ChevronUp size={17}/>:<ChevronDown size={17}/>}</button>{expanded&&<><div className="crew-summary">{s?.complete?'施工完成':'2 人固定运输 · 3 人独立施工'}</div><div className="crew-list">{(s?.workers??[]).map(w=>{const RoleIcon=ROLE_ICONS[w.id];return <div key={w.id} className="crew-row"><span className="worker-avatar" style={{'--worker':w.color} as React.CSSProperties}><RoleIcon size={21}/><small>{String(w.id+1).padStart(2,'0')}</small></span><div className="worker-details"><div><b>{w.role} {String(w.id+1).padStart(2,'0')}</b><span className={`state ${w.state}`}>{w.state==='waitingSupply'&&w.id<2?(s?.task(w)?.supply==='cart'?'已装货 · 等卸货位':'缺料待补充'):STATE[w.state]}</span></div><p>{s?.task(w)?.label??(w.state==='finished'?'房屋已交付':w.id<2?'返回取下一批货':'前往自己的下一项施工')}</p></div></div>})}</div><div className="crew-foot"><span>已完成 {s?.crane.lifts??0} 次高层吊装</span><span>HOUSE–001 <ArrowUpRight size={12}/></span></div></>}</aside>
-  <div className="stage-track" aria-label="施工阶段">{STAGES.map((label,i)=><div className={`${i<stage?'done':''} ${i===stage?'active':''}`} key={label}><span>{i<stage?<Check size={12}/>:String(i+1).padStart(2,'0')}</span><b>{label}</b></div>)}</div>
-  <div className="scene-caption"><span className="caption-line"/><span>一座小小的世界，正在生长。</span></div>
-  <footer className="bottom-bar"><div className="mouse-help"><MousePointer2 size={15}/><span>拖动旋转 · 滚轮缩放 · 右键平移</span></div><div className="controls"><button className="play-button" disabled={!ready} onClick={()=>{if(s)s.paused=!s.paused;update(x=>x+1);}} aria-label={paused?'继续建造':'暂停建造'}>{paused?<Play size={17} fill="currentColor"/>:<Pause size={17} fill="currentColor"/>}<span>{paused?'继续':'暂停'}</span></button><div className="speeds" aria-label="模拟速度">{[1,2,4].map(speed=><button key={speed} aria-pressed={s?.speed===speed} className={s?.speed===speed?'selected':''} onClick={()=>{if(s)s.speed=speed;update(x=>x+1);}}>{speed}×</button>)}</div><span className="control-divider"/><button className="icon-button" aria-label="恢复视角" title="恢复视角" onClick={()=>world.current?.resetView()}><Focus size={19}/></button><AlertDialog><AlertDialogTrigger asChild><button className="icon-button" aria-label="重新建造" title="重新建造"><RotateCcw size={17}/></button></AlertDialogTrigger><AlertDialogContent className="reset-dialog"><AlertDialogTitle>重新开始建造？</AlertDialogTitle><AlertDialogDescription>当前施工进度将清空，五名工人会从基础作业重新开始。</AlertDialogDescription><AlertDialogFooter><AlertDialogCancel>继续观看</AlertDialogCancel><AlertDialogAction onClick={()=>setEpoch(x=>x+1)}>重新建造</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog></div><div className="local-note"><VolumeX size={14}/><span>本地演示 · 刷新后重新开始</span></div></footer>
-  {!ready&&<div className="loading-panel" role="status"><Box size={28}/><h2>{error?'暂时无法进入工地':'正在准备工地'}</h2><p>{error||'安放地形、材料和五顶安全帽…'}</p>{error&&<button onClick={()=>setEpoch(x=>x+1)}>重新加载</button>}</div>}
+  <div ref={host} className="scene" aria-label="拖动旋转，滚轮缩放，右键平移"/>
+  <header className="minimal-header"><h1><HardHat size={22} strokeWidth={1.5}/>第五顶安全帽</h1><output ref={fps} aria-label="实时帧率" aria-live="off">— FPS</output></header>
+  <div className="minimal-progress" aria-label={`施工进度 ${progress}%`}><span>{s?.complete?'完成':`${progress}%`}</span><span className="progress-line"><i style={{width:`${progress}%`}}/></span><time>{clock(s?.time??0)}</time></div>
+  <nav className="playback-controls" aria-label="播放控制">
+   <button disabled={!ready} aria-label={paused?'继续':'暂停'} title={paused?'继续':'暂停'} onClick={()=>{if(s)s.paused=!s.paused;update(v=>v+1);}}>{paused?<Play size={18}/>:<Pause size={18}/>}</button>
+   <div className="speed-buttons">{[1,2,4].map(speed=><button key={speed} aria-pressed={s?.speed===speed} onClick={()=>{if(s)s.speed=speed;update(v=>v+1);}}>{speed}×</button>)}</div>
+   <button aria-label="恢复视角" title="恢复视角" onClick={()=>world.current?.resetView()}><Focus size={19}/></button>
+   <AlertDialog><AlertDialogTrigger asChild><button aria-label="重新建造" title="重新建造"><RotateCcw size={17}/></button></AlertDialogTrigger><AlertDialogContent className="reset-dialog"><AlertDialogTitle>重新建造？</AlertDialogTitle><AlertDialogDescription>当前进度将清空。</AlertDialogDescription><AlertDialogFooter><AlertDialogCancel>取消</AlertDialogCancel><AlertDialogAction onClick={()=>setEpoch(v=>v+1)}>重新开始</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
+  </nav>
+  {!ready&&<div className="loading-panel" role="status"><p>{error||'准备开工…'}</p>{error&&<button onClick={()=>setEpoch(v=>v+1)}>重试</button>}</div>}
  </main>;
 }

@@ -1,8 +1,10 @@
 import * as THREE from 'three';
+import {Playback,type Choreography} from './playback';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import {siteSolids,PAD,GROUND_BAY} from './layout';
 import { Simulation, MATERIALS, CRANE_CONTROL, type MaterialKind, type V3 } from './simulation';
-export function createWorld(container:HTMLDivElement,sim:Simulation,onTick:()=>void){
+export function createWorld(container:HTMLDivElement,sim:Simulation,onTick:()=>void,data:Choreography,onFps:(fps:number)=>void){
+ const playback=new Playback(sim,data);
  const horizon='#273532';const scene=new THREE.Scene();scene.background=new THREE.Color(horizon);scene.fog=new THREE.Fog(horizon,48,112);
  const renderer=new THREE.WebGLRenderer({antialias:true,alpha:false});renderer.setPixelRatio(Math.min(devicePixelRatio,2));renderer.shadowMap.enabled=true;renderer.shadowMap.type=THREE.PCFShadowMap;renderer.outputColorSpace=THREE.SRGBColorSpace;renderer.toneMapping=THREE.ACESFilmicToneMapping;renderer.toneMappingExposure=1.25;container.appendChild(renderer.domElement);
  const camera=new THREE.OrthographicCamera(-24,24,19,-19,.1,180);camera.position.set(0,34,-44);
@@ -152,8 +154,11 @@ export function createWorld(container:HTMLDivElement,sim:Simulation,onTick:()=>v
  }
  instanceStatic(scene,new Set<THREE.Object3D>([...buildingMeshes.values(),...completedBatches.values(),cable,hook,slingA,slingB]));
  instanceStatic(scaffold);instanceStatic(crane);
- let acc=0,last=performance.now(),ui=0,raf=0,disposed=false,lastCart:V3=[...sim.cartPos],lastCart2:V3=[...sim.cart2Pos];const resize=()=>{const w=container.clientWidth,h=container.clientHeight;renderer.setSize(w,h);const half=window.innerWidth<650?23:18.8;camera.left=-half*w/h;camera.right=half*w/h;camera.top=half;camera.bottom=-half;camera.updateProjectionMatrix();};const observer=new ResizeObserver(resize);observer.observe(container);resize();
- function frame(now:number){if(disposed)return;const delta=Math.min((now-last)/1000,.1);last=now;if(!document.hidden&&!sim.paused){acc=Math.min(.2,acc+delta*sim.speed*1.6);const start=performance.now();let steps=0;while(acc>=1/30&&steps<6){sim.advance(1/30);acc-=1/30;steps++;if(performance.now()-start>6)break;}}else acc=0;
+ let fpsStart=performance.now(),fpsFrames=0,last=performance.now(),ui=0,raf=0,disposed=false,lastCart:V3=[...sim.cartPos],lastCart2:V3=[...sim.cart2Pos];const resize=()=>{const w=container.clientWidth,h=container.clientHeight;renderer.setSize(w,h);const half=window.innerWidth<650?23:18.8;camera.left=-half*w/h;camera.right=half*w/h;camera.top=half;camera.bottom=-half;camera.updateProjectionMatrix();};const observer=new ResizeObserver(resize);observer.observe(container);resize();
+ function frame(now:number){if(disposed)return;const delta=Math.min((now-last)/1000,.1);last=now;
+  if(document.hidden){fpsStart=now;fpsFrames=0;raf=requestAnimationFrame(frame);return;}
+  playback.advance(delta*sim.speed*1.6);
+
   for(const t of sim.tasks){if(settledTasks.has(t.id))continue;const progress=t.progress/t.work;for(let i=0;i<t.parts.length;i++){const p=t.parts[i],m=buildingMeshes.get(p.id)!;const f=Math.max(0,Math.min(1,progress*t.parts.length-i));m.visible=f>0;if(f>0){m.scale.y=p.size[1]*f;m.position.y=p.pos[1]-p.size[1]*(1-f)/2;}
     if(t.done){m.updateMatrix();m.matrixAutoUpdate=false;const batch=completedBatches.get(m.material as THREE.Material);if(batch){batch.setMatrixAt(batch.count++,m.matrix);batch.instanceMatrix.needsUpdate=true;batch.computeBoundingSphere();m.visible=false;}}
    }if(t.done)settledTasks.add(t.id);}
@@ -174,8 +179,8 @@ export function createWorld(container:HTMLDivElement,sim:Simulation,onTick:()=>v
   for(const [line,dx] of [[slingA,-.3],[slingB,.3]] as const){line.visible=c.load;line.position.set(c.pos[0]+dx*.5,c.pos[1]-.7,c.pos[2]);line.scale.y=1.43;line.rotation.z=dx<0?-.21:.21;}
   sim.workers.forEach((w,i)=>{
    const m=workerModels[i];const moving=Math.hypot(w.pos[0]-m.g.position.x,w.pos[1]-m.g.position.y,w.pos[2]-m.g.position.z)>.002;m.g.position.set(...w.pos);const working=w.state==='working';const task=sim.task(w);
-   if(w.state==='working'&&task)w.heading=Math.atan2(task.parts[0].pos[0]-w.pos[0],task.parts[0].pos[2]-w.pos[2]);if(w.state==='operating')w.heading=0;
-   m.g.rotation.y=w.heading;const stride=moving?Math.sin(w.phase*11)*.55:0;m.limbs[0].rotation.x=stride;m.limbs[1].rotation.x=-stride;m.limbs[2].rotation.x=-stride;m.limbs[3].rotation.x=stride;
+   const heading=w.state==='working'&&task?Math.atan2(task.parts[0].pos[0]-w.pos[0],task.parts[0].pos[2]-w.pos[2]):w.heading;
+   m.g.rotation.y=heading;const stride=moving?Math.sin(w.phase*11)*.55:0;m.limbs[0].rotation.x=stride;m.limbs[1].rotation.x=-stride;m.limbs[2].rotation.x=-stride;m.limbs[3].rotation.x=stride;
    const transporting=w.state==='handcarry';m.personalCart.visible=false;m.parcel.visible=i>=2&&transporting;m.hammer.visible=w.state==='working'&&i===3;m.trowel.visible=w.state==='working'&&i===2;m.drill.visible=w.state==='working'&&i===4;
    if(i<2&&['material','carrying','loading','unloading'].includes(w.state)){m.limbs[0].rotation.x=m.limbs[1].rotation.x=-1.15;if(w.state==='loading'||w.state==='unloading')m.limbs[1].rotation.x=-1+Math.sin(w.phase*5)*.3;}
    if(w.state==='operating'){m.limbs[0].rotation.x=-.9;m.limbs[1].rotation.x=-.9+Math.sin(w.phase*3)*.12;}
@@ -184,7 +189,7 @@ export function createWorld(container:HTMLDivElement,sim:Simulation,onTick:()=>v
    if(w.state==='working'){m.limbs[2].rotation.x=0;m.limbs[3].rotation.x=0;if(i===2)m.limbs[1].rotation.x=-1+Math.sin(w.phase*6)*.3;else if(i===3)m.limbs[1].rotation.x=-.7+Math.sin(w.phase*13)*.65;else m.limbs[1].rotation.x=-1.4+Math.sin(w.phase*25)*.035;}
    m.g.position.y+=moving?Math.abs(Math.sin(w.phase*11))*.025:0;
   });
-  controls.update();renderer.render(scene,camera);ui+=delta;if(ui>.16){ui=0;onTick();}raf=requestAnimationFrame(frame);
+  controls.update();renderer.render(scene,camera);fpsFrames++;if(now-fpsStart>=500){onFps(Math.round(fpsFrames*1000/(now-fpsStart)));fpsStart=now;fpsFrames=0;}ui+=delta;if(ui>.16){ui=0;onTick();}raf=requestAnimationFrame(frame);
  }
  raf=requestAnimationFrame(frame);
  return {resetView(){camera.position.set(0,34,-44);camera.zoom=1;controls.target.set(0,1.5,0);camera.updateProjectionMatrix();controls.update();},dispose(){disposed=true;cancelAnimationFrame(raf);observer.disconnect();controls.dispose();scene.traverse(o=>{if(o instanceof THREE.Mesh){if(o.geometry!==cube)o.geometry.dispose();const ms=Array.isArray(o.material)?o.material:[o.material];ms.forEach(m=>m.dispose());}});geometries.forEach(g=>g.dispose());textures.forEach(t=>t.dispose());renderer.dispose();renderer.domElement.remove();}};
