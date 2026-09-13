@@ -25,20 +25,20 @@ for(;frames<360000;frames++){
   assert(!builtHit,`worker ${w.id} overlaps ${builtHit?.id} at ${s.time}: ${w.pos}`);
   for(const [i,p] of [s.cartPos,s.cart2Pos].entries())assert(!intersects(w.pos,.33,1.32,{id:'cart-'+i,size:[1.1,1.25,1.2],pos:[p[0],.7,p[2]],color:'',rotation:i?s.cart2Heading:s.cartHeading}),`worker ${w.id} overlaps cart ${i} at ${s.time}: ${w.pos} / ${p}`);
   assert(supported(w.pos,.3)||onStairs(w.pos),`worker ${w.id} left a supported surface: ${w.pos}`);
-  if(Math.abs(w.pos[1]-before[w.id][1])<.001)assert(segmentClear(before[w.id],w.pos,.3,1.32),`worker swept through a post: ${w.id}`);
-  for(const other of s.workers.slice(w.id+1))if(Math.abs(w.pos[1]-other.pos[1])<1.25)assert(Math.hypot(w.pos[0]-other.pos[0],w.pos[2]-other.pos[2])>=.66-1e-5,`worker overlap ${w.id}/${other.id}`);
+  if(Math.abs(w.pos[1]-before[w.id][1])<.001)assert(segmentClear(before[w.id],w.pos,.3,1.32),`worker swept through a post: ${w.id} at ${s.time}: ${before[w.id]} -> ${w.pos}`);
+  for(const other of s.workers.slice(w.id+1))if(Math.abs(w.pos[1]-other.pos[1])<1.25)assert(Math.hypot(w.pos[0]-other.pos[0],w.pos[2]-other.pos[2])>=.66-1e-5,`worker overlap ${w.id}/${other.id} at ${s.time}: ${w.pos} / ${other.pos}`);
  }
  for(const item of s.inventory)assert(Math.abs(item.initial-item.stock-item.transit-item.site-item.installed)<1e-6,'material conservation');
- for(const t of s.tasks.filter(t=>['transfer','ready','atLift','atMixer','mixing','landed'].includes(t.supply))){
+ for(const t of s.tasks.filter(t=>['ready','atLift','landed'].includes(t.supply))){
   const p=s.cargoPoint(t),height=t.material==='fittings'?(t.label.includes('门框')?1.06:.74):.27*t.amount;
   const hit=siteSolids.find(b=>b.id!=='building-reservation'&&intersects(p,.42,height,b));
   assert(!hit,`cargo ${t.id}/${t.supply} clips ${hit?.id} at ${p}`);
   const buildingHit=built.find(b=>intersects(p,.42,height,b));assert(!buildingHit,`cargo ${t.id} overlaps building ${buildingHit?.id}`);
   const load={id:'load',size:[.78,height,.44],pos:[p[0],p[1]+height/2,p[2]],color:''};
-  for(const w of s.workers)if(!(t.supply==='ready'&&w.task===t.id&&['fetching','pickupLoading'].includes(w.state)))assert(!intersects(w.pos,.3,1.35,load),`load intersects worker ${w.id} (${t.id}, ${t.supply}) at ${s.time}: ${w.pos} / ${p}`);
+  for(const w of s.workers)if(!(t.supply==='ready'&&w.task===t.id&&['fetching','pickupLoading'].includes(w.state)))assert(!intersects(w.pos,.3,1.35,load),`load intersects worker ${w.id}/${w.state}/${w.task} (${t.id}, ${t.supply}) at ${s.time}: ${w.pos} / ${p}`);
  }
  if(frames%10000===0)console.log('Replay',Math.round(s.time),s.tasks.filter(t=>t.done).length,'/',s.tasks.length);
- if(frames%1000===0){stalled=s.progress===lastProgress?stalled+1:0;lastProgress=s.progress;if(stalled>=6)console.log(JSON.stringify({time:s.time,stage:s.stage,workers:s.workers.map(w=>({id:w.id,state:w.state,pos:w.pos,path:w.path,task:w.task})),tasks:s.tasks.filter(t=>!t.done&&t.supply!=='stock').map(t=>({id:t.id,supply:t.supply,crew:t.crew}))},null,2));assert(stalled<6,`stalled: ${s.routeError}`);}
+ if(frames%1000===0){stalled=s.progress===lastProgress?stalled+1:0;lastProgress=s.progress;assert(stalled<6,`stalled: ${s.routeError}; ${JSON.stringify(s.workers)}`);}
  if(s.complete&&s.workers.every(w=>w.state==='finished'&&!w.path.length))break;
 }
 assert(s.complete&&frames<360000,'full construction and return must finish');

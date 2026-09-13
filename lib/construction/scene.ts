@@ -119,6 +119,13 @@ export function createWorld(container:HTMLDivElement,sim:Simulation,onTick:()=>v
  box([.66,.12,.4],[CRANE_CONTROL[0],.83,CRANE_CONTROL[2]+.8],'#c9b879');for(const x of [-.15,.15])rod([CRANE_CONTROL[0]+x,.83,CRANE_CONTROL[2]+.7],[CRANE_CONTROL[0]+x,1.02,CRANE_CONTROL[2]+.65],.04,'#344d3f');
  const buildingMeshes=new Map<string,THREE.Mesh>();
  for(const task of sim.tasks)for(const p of task.parts){const m=box(p.size,p.pos,p.color);if(p.glass)m.material=material(p.color,true);if(p.rotation)m.rotation.set(...p.rotation);m.visible=false;buildingMeshes.set(p.id,m);}
+ // Finished opaque parts share one draw call per material, including shadows.
+ // Only the handful of parts currently being built keep animated meshes.
+ const completedBatches=new Map<THREE.Material,THREE.InstancedMesh>();
+ const capacities=new Map<THREE.Material,number>();
+ for(const m of buildingMeshes.values()){const mat=m.material as THREE.Material;if(!mat.transparent)capacities.set(mat,(capacities.get(mat)??0)+1);}
+ for(const [mat,count] of capacities){const batch=new THREE.InstancedMesh(cube,mat,count);batch.count=0;batch.castShadow=true;batch.receiveShadow=true;scene.add(batch);completedBatches.set(mat,batch);}
+ const settledTasks=new Set<string>();
  const workerModels=sim.workers.map(w=>{
   const g=new THREE.Group();scene.add(g);box([.43,.46,.28],[0,.67,0],w.color,g);box([.44,.055,.3],[0,.64,0],'#e8d894',g);box([.3,.31,.29],[0,1.07,0],'#d7af7f',g);box([.39,.13,.36],[0,1.28,0],'#f1c151',g);box([.46,.04,.46],[0,1.2,.04],'#e3ab35',g);box([.05,.045,.025],[-.075,1.1,.15],'#354b41',g);box([.05,.045,.025],[.075,1.1,.15],'#354b41',g);
   const limbs:THREE.Group[]=[];for(const [x,y] of [[-.27,.85],[.27,.85],[-.12,.45],[.12,.45]]){const limb=new THREE.Group();limb.position.set(x,y,0);g.add(limb);const leg=y<.5;box([leg?.14:.12,leg?.35:.3,.15],[0,leg?-.17:-.13,0],leg?'#3a524e':w.color,limb);box([leg?.17:.13,.1,leg?.24:.13],[0,leg?-.37:-.31,leg?.035:0],leg?'#293e37':'#d7af7f',limb);limbs.push(limb);}
@@ -143,11 +150,13 @@ export function createWorld(container:HTMLDivElement,sim:Simulation,onTick:()=>v
    meshes.forEach((mesh,i)=>{mesh.updateMatrix();batch.setMatrixAt(i,mesh.matrix);parent.remove(mesh);});batch.instanceMatrix.needsUpdate=true;batch.computeBoundingSphere();parent.add(batch);
   }
  }
- instanceStatic(scene,new Set<THREE.Object3D>([...buildingMeshes.values(),cable,hook,slingA,slingB]));
+ instanceStatic(scene,new Set<THREE.Object3D>([...buildingMeshes.values(),...completedBatches.values(),cable,hook,slingA,slingB]));
  instanceStatic(scaffold);instanceStatic(crane);
  let acc=0,last=performance.now(),ui=0,raf=0,disposed=false,lastCart:V3=[...sim.cartPos],lastCart2:V3=[...sim.cart2Pos];const resize=()=>{const w=container.clientWidth,h=container.clientHeight;renderer.setSize(w,h);const half=window.innerWidth<650?23:18.8;camera.left=-half*w/h;camera.right=half*w/h;camera.top=half;camera.bottom=-half;camera.updateProjectionMatrix();};const observer=new ResizeObserver(resize);observer.observe(container);resize();
- function frame(now:number){if(disposed)return;const delta=Math.min((now-last)/1000,.1);last=now;if(!document.hidden&&!sim.paused){acc+=delta*sim.speed*1.6;while(acc>=1/30){sim.advance(1/30);acc-=1/30;}}else acc=0;
-  for(const t of sim.tasks){const progress=t.progress/t.work;for(let i=0;i<t.parts.length;i++){const p=t.parts[i],m=buildingMeshes.get(p.id)!;const f=Math.max(0,Math.min(1,progress*t.parts.length-i));m.visible=f>0;if(f>0){m.scale.y=p.size[1]*f;m.position.y=p.pos[1]-p.size[1]*(1-f)/2;}}}
+ function frame(now:number){if(disposed)return;const delta=Math.min((now-last)/1000,.1);last=now;if(!document.hidden&&!sim.paused){acc=Math.min(.2,acc+delta*sim.speed*1.6);const start=performance.now();let steps=0;while(acc>=1/30&&steps<6){sim.advance(1/30);acc-=1/30;steps++;if(performance.now()-start>6)break;}}else acc=0;
+  for(const t of sim.tasks){if(settledTasks.has(t.id))continue;const progress=t.progress/t.work;for(let i=0;i<t.parts.length;i++){const p=t.parts[i],m=buildingMeshes.get(p.id)!;const f=Math.max(0,Math.min(1,progress*t.parts.length-i));m.visible=f>0;if(f>0){m.scale.y=p.size[1]*f;m.position.y=p.pos[1]-p.size[1]*(1-f)/2;}
+    if(t.done){m.updateMatrix();m.matrixAutoUpdate=false;const batch=completedBatches.get(m.material as THREE.Material);if(batch){batch.setMatrixAt(batch.count++,m.matrix);batch.instanceMatrix.needsUpdate=true;batch.computeBoundingSphere();m.visible=false;}}
+   }if(t.done)settledTasks.add(t.id);}
   scaffold.visible=!sim.complete||sim.workers.some(w=>w.pos[1]>.05);
   for(const [kind,meshes] of stockMeshes)meshes.forEach((m,n)=>{m.visible=n<sim.stock[kind];});
   const courier=sim.workers[0],courier2=sim.workers[1],carried=sim.task(courier),carried2=sim.task(courier2);
@@ -158,21 +167,20 @@ export function createWorld(container:HTMLDivElement,sim:Simulation,onTick:()=>v
   cartWheels2.forEach(w=>{w.rotation.x=cart2Moved?courier2.phase*9:w.rotation.x;});
   for(const [kind,units] of cargoGroups)units.forEach((m,n)=>{m.visible=carried?.supply==='cart'&&courier.state!=='unloading'&&carried.material===kind&&n<carried.amount;});
   for(const [kind,units] of cargoGroups2)units.forEach((m,n)=>{m.visible=carried2?.supply==='cart'&&courier2.state!=='unloading'&&carried2.material===kind&&n<carried2.amount;});
-  for(const t of sim.tasks){const units=stagedLoads.get(t.id)!;const atPad=t.supply==='atLift';const driver=sim.workers[t.driver??0];const onSite=['ready','atMixer','mixing','landed','transfer'].includes(t.supply)||(driver.task===t.id&&driver.state==='unloading');const p=sim.cargoPoint(t);const remaining=t.amount-t.used;units.forEach((m,n)=>{const f=Math.max(0,Math.min(1,remaining-n));m.visible=(atPad||onSite)&&f>0;m.position.set(p[0],p[1]+n*.27,p[2]);m.scale.set(1,f,1);});}
+  for(const t of sim.tasks){const units=stagedLoads.get(t.id)!;const atPad=t.supply==='atLift';const driver=sim.workers[t.driver??0];const onSite=['ready','landed'].includes(t.supply)||(driver.task===t.id&&driver.state==='unloading');const p=sim.cargoPoint(t);const remaining=t.amount-t.used;units.forEach((m,n)=>{const f=Math.max(0,Math.min(1,remaining-n));m.visible=(atPad||onSite)&&f>0;m.position.set(p[0],p[1]+n*.27,p[2]);m.scale.set(1,f,1);});}
   mixer.position.set(...sim.mixerPos);drum.rotation.y=sim.mixerAngle;
   const c=sim.crane,ct=sim.tasks.find(t=>t.id===c.task);jib.rotation.y=-Math.atan2(c.pos[2]-cz,c.pos[0]-cx);trolley.position.x=Math.hypot(c.pos[0]-cx,c.pos[2]-cz);cable.position.set(c.pos[0],(11.8+c.pos[1])/2,c.pos[2]);cable.scale.y=Math.max(.1,11.8-c.pos[1]);hook.position.set(...c.pos);liftLoad.position.set(c.pos[0],c.pos[1]-1.4,c.pos[2]);liftLoad.visible=c.load;
   for(const [kind,units] of liftKits)units.forEach((m,n)=>{m.visible=c.load&&ct?.material===kind&&n<ct.amount;});
   for(const [line,dx] of [[slingA,-.3],[slingB,.3]] as const){line.visible=c.load;line.position.set(c.pos[0]+dx*.5,c.pos[1]-.7,c.pos[2]);line.scale.y=1.43;line.rotation.z=dx<0?-.21:.21;}
   sim.workers.forEach((w,i)=>{
-   const m=workerModels[i];const moving=Math.hypot(w.pos[0]-m.g.position.x,w.pos[1]-m.g.position.y,w.pos[2]-m.g.position.z)>.002;m.g.position.set(...w.pos);const working=w.state==='working'||w.state==='supporting';const task=sim.task(w);
+   const m=workerModels[i];const moving=Math.hypot(w.pos[0]-m.g.position.x,w.pos[1]-m.g.position.y,w.pos[2]-m.g.position.z)>.002;m.g.position.set(...w.pos);const working=w.state==='working';const task=sim.task(w);
    if(w.state==='working'&&task)w.heading=Math.atan2(task.parts[0].pos[0]-w.pos[0],task.parts[0].pos[2]-w.pos[2]);if(w.state==='operating')w.heading=0;
    m.g.rotation.y=w.heading;const stride=moving?Math.sin(w.phase*11)*.55:0;m.limbs[0].rotation.x=stride;m.limbs[1].rotation.x=-stride;m.limbs[2].rotation.x=-stride;m.limbs[3].rotation.x=stride;
    const transporting=w.state==='handcarry';m.personalCart.visible=false;m.parcel.visible=i>=2&&transporting;m.hammer.visible=w.state==='working'&&i===3;m.trowel.visible=w.state==='working'&&i===2;m.drill.visible=w.state==='working'&&i===4;
    if(i<2&&['material','carrying','loading','unloading'].includes(w.state)){m.limbs[0].rotation.x=m.limbs[1].rotation.x=-1.15;if(w.state==='loading'||w.state==='unloading')m.limbs[1].rotation.x=-1+Math.sin(w.phase*5)*.3;}
    if(w.state==='operating'){m.limbs[0].rotation.x=-.9;m.limbs[1].rotation.x=-.9+Math.sin(w.phase*3)*.12;}
-   if(w.state==='handcarry'||w.state==='unloadTrip'){m.limbs[0].rotation.x=m.limbs[1].rotation.x=-Math.PI;}
+   if(w.state==='handcarry'){m.limbs[0].rotation.x=m.limbs[1].rotation.x=-Math.PI;}
    if(w.state==='pickupLoading'){m.limbs[2].rotation.x=m.limbs[3].rotation.x=0;m.limbs[1].rotation.x=-1+Math.sin(w.phase*7)*.28;}
-   if(w.state==='mixing')m.limbs[1].rotation.x=-1+Math.sin(w.phase*4)*.25;
    if(w.state==='working'){m.limbs[2].rotation.x=0;m.limbs[3].rotation.x=0;if(i===2)m.limbs[1].rotation.x=-1+Math.sin(w.phase*6)*.3;else if(i===3)m.limbs[1].rotation.x=-.7+Math.sin(w.phase*13)*.65;else m.limbs[1].rotation.x=-1.4+Math.sin(w.phase*25)*.035;}
    m.g.position.y+=moving?Math.abs(Math.sin(w.phase*11))*.025:0;
   });

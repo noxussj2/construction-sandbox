@@ -8,9 +8,10 @@ export const CONTROL:Vec3=[-4.8,0,6.8];
 export const LANDINGS:Vec3[]=[[-2,3.3,-6.5],[2,6.2,-8]];
 export const STAIRS:Vec3[]=[[7,0,-4.85],[7,1.65,0],[7,1.65,.5],[8.3,1.65,.5],[8.3,3.3,-4.35],[8.3,3.3,-4.85],[7,3.3,-4.85],[7,4.75,0],[7,4.75,.5],[8.3,4.75,.5],[8.3,6.2,-4.35],[8.3,6.2,-4.85],[7,6.2,-4.85]];
 export const RADIUS=.38;
-// A conservative swept disk contains the cart AND the worker behind its handle,
-// including the entire assembly while turning. Cart coordinates are its centre.
-export const CART_RADIUS=1.5;
+// The cart body owns this swept radius. The worker behind the handle remains a
+// separate collision body, so combining both into one oversized 3 m disk would
+// incorrectly close the two-lane service road.
+export const CART_RADIUS=.72;
 export const STOCK_Z=[-7.5,-4.5,-1.5,1.5,4.5,7.5];
 export const siteSolids:Solid[]=[];
 function solid(id:string,size:Vec3,pos:Vec3,color:string,surface=false,obstacle=true){siteSolids.push({id,size,pos,color,surface,obstacle});}
@@ -19,7 +20,9 @@ for(let i=0;i<6;i++){
  // Full-stock envelope remains reserved as the stacks empty.
  solid(`stock-envelope-${i}`,[3.2,1.8,2.15],[-13,1,STOCK_Z[i]],'invisible');
 }
-solid('building-reservation',[9.6,8,7.7],[0,4,0],'invisible');
+// Reserve the true structural footprint, not the surrounding scaffold lane.
+// Finished walls and columns are added as live obstacles by the simulation.
+solid('building-reservation',[7.2,8,5.4],[0,4,0],'invisible');
 solid('office',[4,2.2,2.4],[-3,1.2,9.3],'#647e73');
 solid('office-roof',[4.25,.17,2.65],[-3,2.4,9.3],'#a9b8a3');
 solid('crane-base',[2,.35,2],[-6.6,.27,5.3],'#a6a899');
@@ -30,14 +33,17 @@ for(const [i,[x,z]] of [[-4,-6],[-7,4],[4,-6],[5,-7]].entries())solid(`cone-${i}
 solid('toolbox',[.7,.45,.5],[-7,.35,-5],'#45665c');
 // Decks are wider than two workers; all walk edges are actual supported surfaces.
 for(const y of [3.3,6.2]){
- for(const z of [-4.5,4.5])solid('walk-deck',[12.4,.14,1.8],[0,y-.07,z],'#aa9270',true);
+ solid('walk-deck',[12.4,.14,1.8],[0,y-.07,-4.5],'#aa9270',true);
+ // The rear deck is a genuine two-person circulation lane: parked builders
+ // occupy its outer edge while a carrier can pass on the inner edge.
+ solid('walk-deck',[12.4,.14,4.2],[0,y-.07,4.5],'#aa9270',true);
  for(const x of [-5.3,5.3])solid('walk-deck',[2.25,.14,9],[x,y-.07,0],'#aa9270',true);
  solid('stair-bridge',[3,.14,1.4],[7.1,y-.07,-4.825],'#aa9270',true);
- for(const x of [-6.35,6.35])for(const z of [-5.35,0,5.35])solid('scaffold-post',[.07,y+.95,.07],[x,(y+.95)/2,z],'#6a827b');
- for(const z of [-5.35,5.35])for(const x of [-4,0,4])solid('scaffold-post',[.07,y+.95,.07],[x,(y+.95)/2,z],'#6a827b');
+ for(const x of [-6.35,6.35])for(const z of [-5.35,0,6.55])solid('scaffold-post',[.07,y+.95,.07],[x,(y+.95)/2,z],'#6a827b');
+ for(const z of [-5.35,6.55])for(const x of [-4,0,4])solid('scaffold-post',[.07,y+.95,.07],[x,(y+.95)/2,z],'#6a827b');
  solid('walk-rail',[.05,.05,10.7],[-6.35,y+.85,0],'#6a827b');
  solid('walk-rail',[.05,.05,8.7],[6.35,y+.85,1],'#6a827b');
- solid('walk-rail',[12.7,.05,.05],[0,y+.85,5.35],'#6a827b');
+ solid('walk-rail',[12.7,.05,.05],[0,y+.85,6.55],'#6a827b');
  // Front railing openings match the receiving bridge at this level.
  const opening=y===3.3?-2:2;
  for(const [a,b] of [[-6.35,opening-1.4],[opening+1.4,6.35]])solid('walk-rail',[b-a,.05,.05],[(a+b)/2,y+.85,-5.35],'#6a827b');
@@ -73,19 +79,28 @@ export function clearAt(p:Vec3,radius=RADIUS,height=1.4,extra:Solid[]=[]){
  if(Math.abs(p[0])+radius>18||Math.abs(p[2])+radius>13.5)return false;
  return ![...siteSolids,...extra].some(b=>b.obstacle!==false&&intersects(p,radius,height,b));
 }
+const supportSurfaces=siteSolids.filter(b=>b.surface&&b.id!=='stair-tread');
+const stairSegments=STAIRS.slice(1).map((b,i)=>{const a=STAIRS[i],dx=b[0]-a[0],dy=b[1]-a[1],dz=b[2]-a[2];return {a,dx,dy,dz,length:dx*dx+dy*dy+dz*dz};});
 export function supported(p:Vec3,radius=RADIUS){
  if(p[1]<.2)return true;
- if(radius<=RADIUS&&STAIRS.slice(1).some((b,i)=>{const a=STAIRS[i],d=b.map((v,k)=>v-a[k]),length=d.reduce((n,v)=>n+v*v,0),t=Math.max(0,Math.min(1,d.reduce((n,v,k)=>n+v*(p[k]-a[k]),0)/length));return Math.hypot(...p.map((v,k)=>v-a[k]-t*d[k]))<.025;}))return true;
- return [[0,0],[radius,0],[-radius,0],[0,radius],[0,-radius]].every(([dx,dz])=>siteSolids.some(b=>b.surface&&b.id!=='stair-tread'&&Math.abs(b.pos[1]+b.size[1]/2-p[1])<.05&&Math.abs(p[0]+dx-b.pos[0])<=b.size[0]/2+.001&&Math.abs(p[2]+dz-b.pos[2])<=b.size[2]/2+.001));
+ if(radius<=RADIUS)for(const {a,dx,dy,dz,length} of stairSegments){const x=p[0]-a[0],y=p[1]-a[1],z=p[2]-a[2],t=Math.max(0,Math.min(1,(dx*x+dy*y+dz*z)/length));if(Math.hypot(x-t*dx,y-t*dy,z-t*dz)<.025)return true;}
+ for(let i=0;i<5;i++){const x=p[0]+(i===1?radius:i===2?-radius:0),z=p[2]+(i===3?radius:i===4?-radius:0);let found=false;
+  for(const b of supportSurfaces)if(Math.abs(b.pos[1]+b.size[1]/2-p[1])<.05&&Math.abs(x-b.pos[0])<=b.size[0]/2+.001&&Math.abs(z-b.pos[2])<=b.size[2]/2+.001){found=true;break;}
+  if(!found)return false;
+ }return true;
 }
 export function segmentClear(a:Vec3,b:Vec3,radius=RADIUS,height=1.4,checkSupport=true,extra:Solid[]=[]){
  if([a,b].some(p=>Math.abs(p[0])+radius>18||Math.abs(p[2])+radius>13.5))return false;
  // Slab test of the swept body, not occasional point samples (which can miss a post).
  for(const solid of [...siteSolids,...extra]){
+  // Reject distant solids before allocating slab-test vectors. Most completed
+  // building parts are on another floor or outside this short swept segment.
+  const stepHeight=checkSupport&&radius<=RADIUS&&solid.surface?.3:.18;
+  if(Math.max(a[1],b[1])<=solid.pos[1]-solid.size[1]/2-height||Math.min(a[1],b[1])>=solid.pos[1]+solid.size[1]/2-stepHeight)continue;
+  if(!solid.rotation&&(Math.max(a[0],b[0])+radius<=solid.pos[0]-solid.size[0]/2||Math.min(a[0],b[0])-radius>=solid.pos[0]+solid.size[0]/2||Math.max(a[2],b[2])+radius<=solid.pos[2]-solid.size[2]/2||Math.min(a[2],b[2])-radius>=solid.pos[2]+solid.size[2]/2))continue;
   const local=(p:Vec3):Vec3=>{if(!solid.rotation)return p;const x=p[0]-solid.pos[0],z=p[2]-solid.pos[2],c=Math.cos(solid.rotation),s=Math.sin(solid.rotation);return [solid.pos[0]+c*x-s*z,p[1],solid.pos[2]+s*x+c*z];};
   const from=local(a),to=local(b);
   let lo=0,hi=1;const min=[solid.pos[0]-solid.size[0]/2-radius,solid.pos[1]-solid.size[1]/2-height,solid.pos[2]-solid.size[2]/2-radius];
-  const stepHeight=checkSupport&&radius<=RADIUS&&solid.surface?.3:.18;
   const max=[solid.pos[0]+solid.size[0]/2+radius,solid.pos[1]+solid.size[1]/2-stepHeight,solid.pos[2]+solid.size[2]/2+radius];
   for(let axis=0;axis<3;axis++){const delta=to[axis]-from[axis];if(Math.abs(delta)<1e-8){if(from[axis]<=min[axis]+1e-7||from[axis]>=max[axis]-1e-7){lo=2;break;}}else{const t1=(min[axis]-from[axis])/delta,t2=(max[axis]-from[axis])/delta;lo=Math.max(lo,Math.min(t1,t2));hi=Math.min(hi,Math.max(t1,t2));}}
   if(lo<hi-1e-8&&hi>0&&lo<1)return false;
