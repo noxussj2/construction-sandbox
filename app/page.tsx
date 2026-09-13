@@ -23,8 +23,9 @@ export default function Home(){
  },[epoch]);
  const s=sim.current,paused=s?.paused??false,progress=Math.round((s?.progress??0)*100);
  return <main className="workbench">
-  <div ref={host} className="scene" aria-label="拖动旋转，滚轮缩放，右键平移"/>
+  <div ref={host} className="scene" aria-label="固定距离自动环绕房屋，拖动可调整角度"/>
   <header className="minimal-header"><h1><HardHat size={22} strokeWidth={1.5}/>第五顶安全帽</h1><output ref={fps} aria-label="实时帧率" aria-live="off">— FPS</output></header>
+  <p className="view-help">自动环视 · 拖动调整</p>
   <div className="minimal-progress" aria-label={`施工进度 ${progress}%`}><span>{s?.complete?'完成':`${progress}%`}</span><span className="progress-line"><i style={{width:`${progress}%`}}/></span><time>{clock(s?.time??0)}</time></div>
   <nav className="playback-controls" aria-label="播放控制">
    <button disabled={!ready} aria-label={paused?'继续':'暂停'} title={paused?'继续':'暂停'} onClick={()=>{if(s)s.paused=!s.paused;update(v=>v+1);}}>{paused?<Play size={18}/>:<Pause size={18}/>}</button>

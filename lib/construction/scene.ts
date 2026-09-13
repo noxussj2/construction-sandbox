@@ -1,14 +1,27 @@
 import * as THREE from 'three';
 import {Playback,type Choreography} from './playback';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import {Viewpoint} from './viewpoint';
 import {siteSolids,PAD,GROUND_BAY} from './layout';
 import { Simulation, MATERIALS, CRANE_CONTROL, type MaterialKind, type V3 } from './simulation';
 export function createWorld(container:HTMLDivElement,sim:Simulation,onTick:()=>void,data:Choreography,onFps:(fps:number)=>void){
  const playback=new Playback(sim,data);
  const horizon='#273532';const scene=new THREE.Scene();scene.background=new THREE.Color(horizon);scene.fog=new THREE.Fog(horizon,48,112);
  const renderer=new THREE.WebGLRenderer({antialias:true,alpha:false});renderer.setPixelRatio(Math.min(devicePixelRatio,2));renderer.shadowMap.enabled=true;renderer.shadowMap.type=THREE.PCFShadowMap;renderer.outputColorSpace=THREE.SRGBColorSpace;renderer.toneMapping=THREE.ACESFilmicToneMapping;renderer.toneMappingExposure=1.25;container.appendChild(renderer.domElement);
- const camera=new THREE.OrthographicCamera(-24,24,19,-19,.1,180);camera.position.set(0,34,-44);
- const controls=new OrbitControls(camera,renderer.domElement);controls.target.set(0,1.5,0);controls.enableDamping=true;controls.minPolarAngle=.02;controls.maxPolarAngle=Math.PI/2.2;controls.minZoom=.65;controls.maxZoom=3.4;controls.maxTargetRadius=15;controls.update();
+ const camera=new THREE.PerspectiveCamera(65,1,.08,180);
+ const viewpoint=new Viewpoint(),canvas=renderer.domElement,keys=new Set<string>();
+ canvas.tabIndex=0;canvas.style.cursor='grab';
+ let pointer:number|null=null,previousX=0,previousY=0;
+ const applyView=()=>{camera.position.set(...viewpoint.position);camera.lookAt(...viewpoint.target);};
+ const release=()=>{const id=pointer;pointer=null;if(id!==null&&canvas.hasPointerCapture(id))canvas.releasePointerCapture(id);canvas.style.cursor='grab';};
+ const down=(event:PointerEvent)=>{if(pointer!==null||event.button>0)return;pointer=event.pointerId;previousX=event.clientX;previousY=event.clientY;canvas.setPointerCapture(pointer);canvas.focus({preventScroll:true});canvas.style.cursor='grabbing';};
+ const move=(event:PointerEvent)=>{if(event.pointerId!==pointer)return;viewpoint.look(event.clientX-previousX,event.clientY-previousY);previousX=event.clientX;previousY=event.clientY;};
+ const wheel=(event:WheelEvent)=>{event.preventDefault();};
+ const keydown=(event:KeyboardEvent)=>{if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','KeyW','KeyA','KeyS','KeyD'].includes(event.code)){keys.add(event.code);event.preventDefault();}};
+ const keyup=(event:KeyboardEvent)=>{keys.delete(event.code);};
+ const blur=()=>{keys.clear();release();};
+ canvas.addEventListener('pointerdown',down);canvas.addEventListener('pointermove',move);canvas.addEventListener('pointerup',release);canvas.addEventListener('pointercancel',release);canvas.addEventListener('lostpointercapture',release);
+ canvas.addEventListener('wheel',wheel,{passive:false});canvas.addEventListener('keydown',keydown);canvas.addEventListener('keyup',keyup);canvas.addEventListener('blur',blur);window.addEventListener('blur',blur);
+ applyView();
  scene.add(new THREE.HemisphereLight('#fff3d8','#607572',2.5));const sun=new THREE.DirectionalLight('#ffe5b8',4.1);sun.position.set(-18,28,-14);sun.castShadow=true;sun.shadow.mapSize.set(2048,2048);Object.assign(sun.shadow.camera,{left:-24,right:24,top:24,bottom:-24,near:.5,far:85});sun.shadow.normalBias=.05;sun.shadow.bias=-.0002;sun.shadow.radius=3;scene.add(sun);const fill=new THREE.DirectionalLight('#b6d9dd',.8);fill.position.set(14,10,12);scene.add(fill);
  const mats=new Map<string,THREE.MeshStandardMaterial>();const cube=new THREE.BoxGeometry(1,1,1);const geometries:THREE.BufferGeometry[]=[cube];const textures:THREE.Texture[]=[];
  function material(color:string,glass=false){const key=color+glass;if(!mats.has(key))mats.set(key,new THREE.MeshStandardMaterial({color,roughness:glass?.2:.82,metalness:0,transparent:glass,opacity:glass?.55:1,depthWrite:!glass}));return mats.get(key)!;}
@@ -154,7 +167,7 @@ export function createWorld(container:HTMLDivElement,sim:Simulation,onTick:()=>v
  }
  instanceStatic(scene,new Set<THREE.Object3D>([...buildingMeshes.values(),...completedBatches.values(),cable,hook,slingA,slingB]));
  instanceStatic(scaffold);instanceStatic(crane);
- let fpsStart=performance.now(),fpsFrames=0,last=performance.now(),ui=0,raf=0,disposed=false,lastCart:V3=[...sim.cartPos],lastCart2:V3=[...sim.cart2Pos];const resize=()=>{const w=container.clientWidth,h=container.clientHeight;renderer.setSize(w,h);const half=window.innerWidth<650?23:18.8;camera.left=-half*w/h;camera.right=half*w/h;camera.top=half;camera.bottom=-half;camera.updateProjectionMatrix();};const observer=new ResizeObserver(resize);observer.observe(container);resize();
+ let fpsStart=performance.now(),fpsFrames=0,last=performance.now(),ui=0,raf=0,disposed=false,lastCart:V3=[...sim.cartPos],lastCart2:V3=[...sim.cart2Pos];const resize=()=>{const w=container.clientWidth,h=container.clientHeight;renderer.setSize(w,h);camera.aspect=w/Math.max(1,h);camera.updateProjectionMatrix();};const observer=new ResizeObserver(resize);observer.observe(container);resize();
  function frame(now:number){if(disposed)return;const delta=Math.min((now-last)/1000,.1);last=now;
   if(document.hidden){fpsStart=now;fpsFrames=0;raf=requestAnimationFrame(frame);return;}
   playback.advance(delta*sim.speed*1.6);
@@ -189,8 +202,9 @@ export function createWorld(container:HTMLDivElement,sim:Simulation,onTick:()=>v
    if(w.state==='working'){m.limbs[2].rotation.x=0;m.limbs[3].rotation.x=0;if(i===2)m.limbs[1].rotation.x=-1+Math.sin(w.phase*6)*.3;else if(i===3)m.limbs[1].rotation.x=-.7+Math.sin(w.phase*13)*.65;else m.limbs[1].rotation.x=-1.4+Math.sin(w.phase*25)*.035;}
    m.g.position.y+=moving?Math.abs(Math.sin(w.phase*11))*.025:0;
   });
-  controls.update();renderer.render(scene,camera);fpsFrames++;if(now-fpsStart>=500){onFps(Math.round(fpsFrames*1000/(now-fpsStart)));fpsStart=now;fpsFrames=0;}ui+=delta;if(ui>.16){ui=0;onTick();}raf=requestAnimationFrame(frame);
+  const forward=['ArrowRight','ArrowUp','KeyD','KeyW'].some(key=>keys.has(key)),backward=['ArrowLeft','ArrowDown','KeyA','KeyS'].some(key=>keys.has(key));
+  viewpoint.walk((Number(forward)-Number(backward))*delta*2.4);if(!sim.paused)viewpoint.update(delta,pointer!==null||forward||backward);applyView();renderer.render(scene,camera);fpsFrames++;if(now-fpsStart>=500){onFps(Math.round(fpsFrames*1000/(now-fpsStart)));fpsStart=now;fpsFrames=0;}ui+=delta;if(ui>.16){ui=0;onTick();}raf=requestAnimationFrame(frame);
  }
  raf=requestAnimationFrame(frame);
- return {resetView(){camera.position.set(0,34,-44);camera.zoom=1;controls.target.set(0,1.5,0);camera.updateProjectionMatrix();controls.update();},dispose(){disposed=true;cancelAnimationFrame(raf);observer.disconnect();controls.dispose();scene.traverse(o=>{if(o instanceof THREE.Mesh){if(o.geometry!==cube)o.geometry.dispose();const ms=Array.isArray(o.material)?o.material:[o.material];ms.forEach(m=>m.dispose());}});geometries.forEach(g=>g.dispose());textures.forEach(t=>t.dispose());renderer.dispose();renderer.domElement.remove();}};
+ return {resetView(){viewpoint.reset();keys.clear();applyView();},dispose(){disposed=true;cancelAnimationFrame(raf);observer.disconnect();blur();canvas.removeEventListener('pointerdown',down);canvas.removeEventListener('pointermove',move);canvas.removeEventListener('pointerup',release);canvas.removeEventListener('pointercancel',release);canvas.removeEventListener('lostpointercapture',release);canvas.removeEventListener('wheel',wheel);canvas.removeEventListener('keydown',keydown);canvas.removeEventListener('keyup',keyup);canvas.removeEventListener('blur',blur);window.removeEventListener('blur',blur);scene.traverse(o=>{if(o instanceof THREE.Mesh){if(o.geometry!==cube)o.geometry.dispose();const ms=Array.isArray(o.material)?o.material:[o.material];ms.forEach(m=>m.dispose());}});geometries.forEach(g=>g.dispose());textures.forEach(t=>t.dispose());renderer.dispose();renderer.domElement.remove();}};
 }
